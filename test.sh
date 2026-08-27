@@ -58,6 +58,19 @@ gs_t_commits() {
 
 gs_t_infer() { gs_t_commits "$@" | awk -f "$DIR/infer.awk" | sort | tr '\t' ' '; }
 
+# Every fixture git call runs with global and system config neutralized: a
+# developer's commit.gpgsign or core.hooksPath would otherwise break these
+# commits, and this suite ships to machines we do not control. Per-command
+# env, so nothing leaks to other test groups (Task 5's herdr group reads
+# $HOME/.config/herdr).
+gs_t_git() {
+  HOME="$GS_T_HOME" \
+  GIT_CONFIG_NOSYSTEM=1 \
+  GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
+  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+  git "$@"
+}
+
 test_infer() {
   # healthy chain: a=[a1] b=[a1,b1,b2] c=[a1,b1,b2,c1]
   gs_assert 'linear stack' \
@@ -118,19 +131,21 @@ y3 y2 3 3 0 y1' \
 # Prints the repo root. Caller removes the parent dir.
 gs_t_fixture() {
   local base="$1" r="$1/repo"
-  export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t
-  export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-  git init -q -b main "$r"
+  gs_t_git init -q -b main "$r"
   ( cd "$r"
-    gs_t_c() { echo "$1" > "$1.txt"; git add -A; git commit -qm "$1"; }
-    gs_t_c m1
-    git checkout -qb feat-a; gs_t_c a1
-    git checkout -qb feat-b; gs_t_c b1
-    git checkout -qb feat-c; gs_t_c c1
-    git checkout -q main
-    git worktree add -q "$base/wt-a" feat-a
-    git worktree add -q "$base/wt-b" feat-b
-    git worktree add -q "$base/wt-c" feat-c
+    gs_t_c() {
+      echo "$1" > "$1.txt"
+      gs_t_git add -A || { echo "add failed for $1" >&2; return 1; }
+      gs_t_git commit -qm "$1" || { echo "commit failed for $1" >&2; return 1; }
+    }
+    gs_t_c m1 || return 1
+    gs_t_git checkout -qb feat-a || return 1; gs_t_c a1 || return 1
+    gs_t_git checkout -qb feat-b || return 1; gs_t_c b1 || return 1
+    gs_t_git checkout -qb feat-c || return 1; gs_t_c c1 || return 1
+    gs_t_git checkout -q main || return 1
+    gs_t_git worktree add -q "$base/wt-a" feat-a || return 1
+    gs_t_git worktree add -q "$base/wt-b" feat-b || return 1
+    gs_t_git worktree add -q "$base/wt-c" feat-c || return 1
   )
   printf '%s\n' "$r"
 }
@@ -140,6 +155,7 @@ test_git() {
   base="$(mktemp -d)"
   # Canonicalize base to match what git stores in .git files (with /private symlink resolved)
   base=$(readlink -f "$base")
+  GS_T_HOME="$base"
   r="$(gs_t_fixture "$base")"
 
   gs_assert 'trunk resolves to main' 'main' "$(gs_trunk "$r")"
@@ -154,13 +170,25 @@ test_git() {
   gs_assert 'branch of main checkout'   'main'   "$(gs_head_branch "$r")"
 
   # detached HEAD reports no branch
-  ( cd "$base/wt-a" && git checkout -q --detach >/dev/null 2>&1 )
+  ( cd "$base/wt-a" && gs_t_git checkout -q --detach >/dev/null 2>&1 )
   gs_head_branch "$base/wt-a" >/dev/null 2>&1
   gs_assert 'detached HEAD returns 1' '1' "$?"
-  ( cd "$base/wt-a" && git checkout -q feat-a >/dev/null 2>&1 )
+  ( cd "$base/wt-a" && gs_t_git checkout -q feat-a >/dev/null 2>&1 )
 
   gs_assert 'not a checkout returns 1' '1' \
     "$(gs_gitdir "$base/nope" >/dev/null 2>&1; echo $?)"
+
+  # malformed .git file: not a gitdir line
+  mkdir -p "$base/bad1"
+  printf 'not-a-gitdir-line\n' > "$base/bad1/.git"
+  gs_gitdir "$base/bad1" >/dev/null 2>&1
+  gs_assert 'malformed .git (no prefix) returns 1' '1' "$?"
+
+  # malformed .git file: gitdir prefix but empty path
+  mkdir -p "$base/bad2"
+  printf 'gitdir: ' > "$base/bad2/.git"
+  gs_gitdir "$base/bad2" >/dev/null 2>&1
+  gs_assert 'malformed .git (empty path) returns 1' '1' "$?"
 
   # end to end: commit lines through inference
   gs_assert 'fixture infers a 3-stack' \
@@ -171,7 +199,7 @@ feat-c feat-b 3 3 0 feat-a' \
        | awk -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
 
   # advance feat-b: the child must now be flagged
-  ( cd "$base/wt-b" && echo b2 > b2.txt && git add -A && git commit -qm b2 )
+  ( cd "$base/wt-b" && echo b2 > b2.txt && gs_t_git add -A && gs_t_git commit -qm b2 )
   gs_assert 'advanced parent flags child in fixture' \
 'feat-a - 1 3 0 feat-a
 feat-b feat-a 2 3 0 feat-a

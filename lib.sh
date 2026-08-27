@@ -54,7 +54,10 @@ gs_gitdir() {
     printf '%s\n' "$p/.git"
   elif [ -f "$p/.git" ]; then
     line=$(<"$p/.git")
-    line="${line#gitdir: }"
+    case "$line" in
+      "gitdir: "*) line="${line#gitdir: }" ;;
+      *) return 1 ;;
+    esac
     [ -n "$line" ] || return 1
     printf '%s\n' "$line"
   else
