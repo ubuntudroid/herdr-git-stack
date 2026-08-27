@@ -99,6 +99,8 @@ GS_HERDR="${HERDR_BIN_PATH:-herdr}"
 # The socket API has no CLI wrapper for workspace.move_block. Transport is
 # newline-delimited JSON and the server closes the connection after replying,
 # so plain `nc -U` terminates on its own.
+# Return 0 means only "a reply arrived" — a JSON-RPC error response is a
+# valid non-empty reply and still returns 0. Callers must inspect the body.
 gs_socket() {
   local sock="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}" out
   [ -S "$sock" ] || return 1
@@ -144,6 +146,7 @@ gs_clear_token() {
 # gs_move_block <anchor|-> <ws_id>...
 gs_move_block() {
   local anchor="$1" ids params
+  [ "$#" -ge 2 ] || return 1     # anchor plus at least one id
   shift
   ids=$(printf '%s\n' "$@" | jq -R . | jq -s -c .)
   if [ "$anchor" = "-" ]; then

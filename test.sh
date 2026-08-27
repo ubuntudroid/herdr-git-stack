@@ -305,13 +305,22 @@ test_herdr() {
   gs_assert 'unreachable socket returns 1' '1' \
     "$(HERDR_SOCKET_PATH=/tmp/gs-no-such.sock gs_socket ping '{}' >/dev/null 2>&1; echo $?)"
 
+  # Every row must have exactly 4 tab-separated fields and a checkout path that
+  # exists on disk. Row count varies by machine, so assert the shape, not a total.
+  local bad
+  bad="$(gs_workspaces | awk -F'\t' 'NF != 4 { n++ } END { print n+0 }')"
+  gs_assert 'gs_workspaces rows have 4 fields' '0' "$bad"
+  bad="$(gs_workspaces | awk -F'\t' '{ print $4 }' | while IFS= read -r p; do [ -d "$p" ] || echo x; done | wc -l | tr -d ' ')"
+  gs_assert 'gs_workspaces checkout paths exist' '0' "$bad"
+
   # Throwaway workspace for the write path.
   # ADAPT IF WRONG: the response shape of `workspace create` was never observed
   # live. If this yields an empty id, run the command by hand, read the JSON,
   # and correct the jq path — do not work around it downstream.
   ws="$("${HERDR_BIN_PATH:-herdr}" workspace create --cwd /tmp --label gs-selftest --no-focus \
         | jq -r '.result.workspace.workspace_id // .workspace.workspace_id')"
-  gs_assert 'created a test workspace' 'yes' "$([ -n "$ws" ] && echo yes || echo no)"
+  gs_assert 'created a test workspace' 'yes' \
+    "$([ -n "$ws" ] && [ "$ws" != "null" ] && echo yes || echo no)"
 
   gs_set_token "$ws" '├2/3 󱓎' 1
   tok="$("${HERDR_BIN_PATH:-herdr}" workspace list \
@@ -328,16 +337,17 @@ test_herdr() {
   gs_assert 'test workspace appears in the order' 'yes' \
     "$(gs_order | grep -qx "$ws" && echo yes || echo no)"
 
-  # move_block round trip: sending the whole current order with anchor "-" moves
-  # every workspace to the end in the order it already has, so it is a no-op.
-  local of ids
+  # Identity reorder: sending the whole current order with anchor "-" moves every
+  # workspace to the end in the order it already has. The response must therefore
+  # echo the same ids in the same order — a dropped, duplicated or reordered id is
+  # a regression in the one function whose job is ordering.
+  local of ids got
   of="$(mktemp)"
   gs_order > "$of"
   ids="$(tr '\n' ' ' < "$of")"
   # shellcheck disable=SC2086
-  gs_assert 'move_block echoes an ordered list' 'yes' \
-    "$(gs_move_block - $ids | jq -e '.result.workspaces | length > 0' >/dev/null \
-       && echo yes || echo no)"
+  got="$(gs_move_block - $ids | jq -r '.result.workspaces[].workspace_id' | tr '\n' ' ')"
+  gs_assert 'move_block preserves ids and order' "$(printf '%s ' $ids)" "$got"
   rm -f "$of"
 
   "${HERDR_BIN_PATH:-herdr}" workspace close "$ws" >/dev/null 2>&1
