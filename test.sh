@@ -20,6 +20,10 @@ gs_assert() {
 }
 
 gs_summary() {
+  if [ $((GS_T_PASS + GS_T_FAIL)) -eq 0 ]; then
+    printf 'no tests ran for group: %s\n' "$GROUP" >&2
+    return 2
+  fi
   printf '%s passed, %s failed\n' "$GS_T_PASS" "$GS_T_FAIL"
   [ "$GS_T_FAIL" -eq 0 ]
 }
@@ -36,6 +40,8 @@ test_token() {
   gs_assert 'size 1 is empty'  ''        "$(gs_token 1 1 0)"
   gs_token 1 1 0 >/dev/null 2>&1
   gs_assert 'size 1 returns 1' '1'       "$?"
+  gs_assert 'unknown group exits 2' '2' \
+    "$("$DIR/test.sh" definitely-not-a-group >/dev/null 2>&1; echo $?)"
 }
 
 GROUP="${1:-all}"
