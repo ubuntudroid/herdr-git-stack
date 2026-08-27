@@ -114,11 +114,82 @@ y3 y2 3 3 0 y1' \
   gs_assert 'empty input' '' "$(printf '' | awk -f "$DIR/infer.awk")"
 }
 
+# Builds a fixture repo with a 3-branch stack, each branch in a linked worktree.
+# Prints the repo root. Caller removes the parent dir.
+gs_t_fixture() {
+  local base="$1" r="$1/repo"
+  export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t
+  export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+  git init -q -b main "$r"
+  ( cd "$r"
+    gs_t_c() { echo "$1" > "$1.txt"; git add -A; git commit -qm "$1"; }
+    gs_t_c m1
+    git checkout -qb feat-a; gs_t_c a1
+    git checkout -qb feat-b; gs_t_c b1
+    git checkout -qb feat-c; gs_t_c c1
+    git checkout -q main
+    git worktree add -q "$base/wt-a" feat-a
+    git worktree add -q "$base/wt-b" feat-b
+    git worktree add -q "$base/wt-c" feat-c
+  )
+  printf '%s\n' "$r"
+}
+
+test_git() {
+  local base r
+  base="$(mktemp -d)"
+  # Canonicalize base to match what git stores in .git files (with /private symlink resolved)
+  base=$(readlink -f "$base")
+  r="$(gs_t_fixture "$base")"
+
+  gs_assert 'trunk resolves to main' 'main' "$(gs_trunk "$r")"
+
+  # the main checkout has a .git directory
+  gs_assert 'gitdir of main checkout' "$r/.git" "$(gs_gitdir "$r")"
+  # a linked worktree has a .git file pointing elsewhere
+  gs_assert 'gitdir of linked worktree' "$r/.git/worktrees/wt-b" \
+    "$(gs_gitdir "$base/wt-b")"
+
+  gs_assert 'branch of linked worktree' 'feat-b' "$(gs_head_branch "$base/wt-b")"
+  gs_assert 'branch of main checkout'   'main'   "$(gs_head_branch "$r")"
+
+  # detached HEAD reports no branch
+  ( cd "$base/wt-a" && git checkout -q --detach >/dev/null 2>&1 )
+  gs_head_branch "$base/wt-a" >/dev/null 2>&1
+  gs_assert 'detached HEAD returns 1' '1' "$?"
+  ( cd "$base/wt-a" && git checkout -q feat-a >/dev/null 2>&1 )
+
+  gs_assert 'not a checkout returns 1' '1' \
+    "$(gs_gitdir "$base/nope" >/dev/null 2>&1; echo $?)"
+
+  # end to end: commit lines through inference
+  gs_assert 'fixture infers a 3-stack' \
+'feat-a - 1 3 0 feat-a
+feat-b feat-a 2 3 0 feat-a
+feat-c feat-b 3 3 0 feat-a' \
+    "$(gs_commit_lines "$r" main feat-a feat-b feat-c \
+       | awk -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
+
+  # advance feat-b: the child must now be flagged
+  ( cd "$base/wt-b" && echo b2 > b2.txt && git add -A && git commit -qm b2 )
+  gs_assert 'advanced parent flags child in fixture' \
+'feat-a - 1 3 0 feat-a
+feat-b feat-a 2 3 0 feat-a
+feat-c feat-b 3 3 1 feat-a' \
+    "$(gs_commit_lines "$r" main feat-a feat-b feat-c \
+       | awk -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
+
+  rm -rf "$base"
+}
+
 GROUP="${1:-all}"
 case "$GROUP" in
   token|all) test_token ;;
 esac
 case "$GROUP" in
   infer|all) test_infer ;;
+esac
+case "$GROUP" in
+  git|all) test_git ;;
 esac
 gs_summary
