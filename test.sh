@@ -225,6 +225,73 @@ feat-c feat-b 3 3 1 feat-a' \
   rm -rf "$base"
 }
 
+# gs_t_moves <stacks-newline-string> <order-newline-string>
+gs_t_moves() {
+  local sf of out
+  sf="$(mktemp)"; of="$(mktemp)"
+  printf '%s\n' "$1" > "$sf"
+  printf '%s\n' "$2" > "$of"
+  out="$(awk -f "$DIR/plan_moves.awk" "$sf" "$of")"
+  rm -f "$sf" "$of"
+  printf '%s' "$out"
+}
+
+test_moves() {
+  gs_assert 'already contiguous and ordered: no move' '' \
+    "$(gs_t_moves 'a b c' 'a
+b
+c')"
+
+  gs_assert 'reversed, whole list: move to end' '- a b c' \
+    "$(gs_t_moves 'a b c' 'c
+b
+a')"
+
+  gs_assert 'reversed with a trailing outsider: anchor on it' 'z a b c' \
+    "$(gs_t_moves 'a b c' 'c
+b
+a
+z')"
+
+  gs_assert 'ordered but interleaved: make contiguous at the landing spot' 'z a b c' \
+    "$(gs_t_moves 'a b c' 'a
+z
+b
+c')"
+
+  gs_assert 'outsiders before the stack keep their places' 'q a b c' \
+    "$(gs_t_moves 'a b c' 'p
+b
+q
+a
+c')"
+
+  gs_assert 'two stacks: only the unordered one moves' '- t1 t2' \
+    "$(gs_t_moves 's1 s2
+t1 t2' 's1
+s2
+x
+t2
+t1')"
+
+  gs_assert 'two stacks both moving, second sees the first applied' 'x s1 s2
+- t1 t2' \
+    "$(gs_t_moves 's1 s2
+t1 t2' 's2
+s1
+x
+t2
+t1')"
+
+  gs_assert 'single-member stack is ignored' '' \
+    "$(gs_t_moves 'a' 'b
+a')"
+
+  gs_assert 'member missing from the order is skipped' '' \
+    "$(gs_t_moves 'a b c' 'c
+b')"
+}
+
 GROUP="${1:-all}"
 case "$GROUP" in
   token|all) test_token ;;
@@ -234,5 +301,8 @@ case "$GROUP" in
 esac
 case "$GROUP" in
   git|all) test_git ;;
+esac
+case "$GROUP" in
+  moves|all) test_moves ;;
 esac
 gs_summary
