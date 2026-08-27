@@ -292,6 +292,59 @@ a')"
 b')"
 }
 
+test_herdr() {
+  local sock="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}" ws tok
+  if [ ! -S "$sock" ]; then
+    printf 'SKIP herdr group: no socket at %s\n' "$sock" >&2
+    return 0
+  fi
+
+  gs_assert 'socket ping' 'pong' \
+    "$(gs_socket ping '{}' | jq -r '.result.type')"
+
+  gs_assert 'unreachable socket returns 1' '1' \
+    "$(HERDR_SOCKET_PATH=/tmp/gs-no-such.sock gs_socket ping '{}' >/dev/null 2>&1; echo $?)"
+
+  # Throwaway workspace for the write path.
+  # ADAPT IF WRONG: the response shape of `workspace create` was never observed
+  # live. If this yields an empty id, run the command by hand, read the JSON,
+  # and correct the jq path — do not work around it downstream.
+  ws="$("${HERDR_BIN_PATH:-herdr}" workspace create --cwd /tmp --label gs-selftest --no-focus \
+        | jq -r '.result.workspace.workspace_id // .workspace.workspace_id')"
+  gs_assert 'created a test workspace' 'yes' "$([ -n "$ws" ] && echo yes || echo no)"
+
+  gs_set_token "$ws" '├2/3 󱓎' 1
+  tok="$("${HERDR_BIN_PATH:-herdr}" workspace list \
+         | jq -r --arg w "$ws" '(.result.workspaces // .workspaces)[]
+                                | select(.workspace_id == $w) | .tokens.stack')"
+  gs_assert 'token round trip keeps the glyph' '├2/3 󱓎' "$tok"
+
+  gs_clear_token "$ws" 2
+  tok="$("${HERDR_BIN_PATH:-herdr}" workspace list \
+         | jq -r --arg w "$ws" '(.result.workspaces // .workspaces)[]
+                                | select(.workspace_id == $w) | .tokens.stack')"
+  gs_assert 'token cleared' 'null' "$tok"
+
+  gs_assert 'test workspace appears in the order' 'yes' \
+    "$(gs_order | grep -qx "$ws" && echo yes || echo no)"
+
+  # move_block round trip: sending the whole current order with anchor "-" moves
+  # every workspace to the end in the order it already has, so it is a no-op.
+  local of ids
+  of="$(mktemp)"
+  gs_order > "$of"
+  ids="$(tr '\n' ' ' < "$of")"
+  # shellcheck disable=SC2086
+  gs_assert 'move_block echoes an ordered list' 'yes' \
+    "$(gs_move_block - $ids | jq -e '.result.workspaces | length > 0' >/dev/null \
+       && echo yes || echo no)"
+  rm -f "$of"
+
+  "${HERDR_BIN_PATH:-herdr}" workspace close "$ws" >/dev/null 2>&1
+  gs_assert 'test workspace closed' 'no' \
+    "$(gs_order | grep -qx "$ws" && echo yes || echo no)"
+}
+
 GROUP="${1:-all}"
 case "$GROUP" in
   token|all) test_token ;;
@@ -304,5 +357,8 @@ case "$GROUP" in
 esac
 case "$GROUP" in
   moves|all) test_moves ;;
+esac
+case "$GROUP" in
+  herdr|all) test_herdr ;;
 esac
 gs_summary

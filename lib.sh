@@ -91,3 +91,66 @@ gs_commit_lines() {
       | awk -v b="$b" '{ print b "\t" $0 }'
   done
 }
+
+GS_TTL_MS="${GIT_STACK_TTL_MS:-9000}"
+GS_HERDR="${HERDR_BIN_PATH:-herdr}"
+
+# gs_socket <method> <params_json>
+# The socket API has no CLI wrapper for workspace.move_block. Transport is
+# newline-delimited JSON and the server closes the connection after replying,
+# so plain `nc -U` terminates on its own.
+gs_socket() {
+  local sock="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}" out
+  [ -S "$sock" ] || return 1
+  out=$(printf '{"id":"gs","method":"%s","params":%s}\n' "$1" "$2" | nc -U "$sock" 2>/dev/null)
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# gs_workspaces -> "<ws_id>\t<repo_key>\t<repo_root>\t<checkout_path>"
+# Only spaces with worktree provenance; a space with no repo cannot be stacked.
+gs_workspaces() {
+  "$GS_HERDR" workspace list 2>/dev/null | jq -r '
+    (.result.workspaces // .workspaces)[]
+    | select(.worktree != null)
+    | [.workspace_id, .worktree.repo_key, .worktree.repo_root, .worktree.checkout_path]
+    | @tsv'
+}
+
+# gs_order -> current sidebar order, one workspace id per line
+gs_order() {
+  "$GS_HERDR" workspace list 2>/dev/null | jq -r '
+    (.result.workspaces // .workspaces)[] | .workspace_id'
+}
+
+# gs_set_token <ws_id> <value> <seq>
+# TTL means a dead daemon's tokens disappear on their own within a few ticks.
+gs_set_token() {
+  "$GS_HERDR" workspace report-metadata "$1" \
+    --source "$GS_SOURCE" \
+    --token "$GS_TOKEN_NAME=$2" \
+    --seq "$3" \
+    --ttl-ms "$GS_TTL_MS" >/dev/null 2>&1
+}
+
+# gs_clear_token <ws_id> <seq>
+gs_clear_token() {
+  "$GS_HERDR" workspace report-metadata "$1" \
+    --source "$GS_SOURCE" \
+    --clear-token "$GS_TOKEN_NAME" \
+    --seq "$2" >/dev/null 2>&1
+}
+
+# gs_move_block <anchor|-> <ws_id>...
+gs_move_block() {
+  local anchor="$1" ids params
+  shift
+  ids=$(printf '%s\n' "$@" | jq -R . | jq -s -c .)
+  if [ "$anchor" = "-" ]; then
+    params=$(jq -n -c --argjson ids "$ids" '{workspace_ids: $ids}')
+  else
+    params=$(jq -n -c --argjson ids "$ids" --arg a "$anchor" \
+      '{workspace_ids: $ids, before_workspace_id: $a}')
+  fi
+  gs_socket workspace.move_block "$params"
+}
