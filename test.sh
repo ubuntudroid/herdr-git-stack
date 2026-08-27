@@ -64,6 +64,10 @@ gs_t_infer() { gs_t_commits "$@" | awk -f "$DIR/infer.awk" | sort | tr '\t' ' ';
 # env, so nothing leaks to other test groups (Task 5's herdr group reads
 # $HOME/.config/herdr).
 gs_t_git() {
+  if [ -z "${GS_T_HOME:-}" ]; then
+    printf 'gs_t_git: GS_T_HOME is unset — fixture isolation would be bypassed\n' >&2
+    return 1
+  fi
   HOME="$GS_T_HOME" \
   GIT_CONFIG_NOSYSTEM=1 \
   GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
@@ -146,7 +150,7 @@ gs_t_fixture() {
     gs_t_git worktree add -q "$base/wt-a" feat-a || return 1
     gs_t_git worktree add -q "$base/wt-b" feat-b || return 1
     gs_t_git worktree add -q "$base/wt-c" feat-c || return 1
-  )
+  ) || return 1
   printf '%s\n' "$r"
 }
 
@@ -156,7 +160,7 @@ test_git() {
   # Canonicalize base to match what git stores in .git files (with /private symlink resolved)
   base=$(readlink -f "$base")
   GS_T_HOME="$base"
-  r="$(gs_t_fixture "$base")"
+  r="$(gs_t_fixture "$base")" || { gs_assert 'fixture built' 'yes' 'no'; rm -rf "$base"; return 1; }
 
   gs_assert 'trunk resolves to main' 'main' "$(gs_trunk "$r")"
 
@@ -206,6 +210,17 @@ feat-b feat-a 2 3 0 feat-a
 feat-c feat-b 3 3 1 feat-a' \
     "$(gs_commit_lines "$r" main feat-a feat-b feat-c \
        | awk -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
+
+  # A fixture that fails partway must report failure, not continue silently.
+  (
+    gs_t_git() { case "$1" in commit) return 1 ;; *) git "$@" ;; esac }
+    b2="$(mktemp -d)"
+    gs_t_fixture "$b2" >/dev/null 2>&1
+    rc=$?
+    rm -rf "$b2"
+    exit $rc
+  )
+  gs_assert 'fixture failure propagates' '1' "$?"
 
   rm -rf "$base"
 }
