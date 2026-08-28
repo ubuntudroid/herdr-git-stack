@@ -55,7 +55,9 @@ gs_preflight() {
 # ("<ws1> <ws2> ...", stack order) to $STATE_DIR/stacks.txt.
 gs_stacks_for_repo() {
   local root="$1" trunk="$2" wsfile="$3"
-  local map="$STATE_DIR/map.tsv" res="$STATE_DIR/infer.tsv" patches="$STATE_DIR/patches.tsv" branches=""
+  local map="$STATE_DIR/map.tsv" res="$STATE_DIR/infer.tsv" patches="$STATE_DIR/patches.tsv"
+  local oids="$STATE_DIR/oids.tsv" orphans="$STATE_DIR/orphans.txt" forks="$STATE_DIR/forks.tsv"
+  : > "$orphans"; : > "$forks" branches=""
   : > "$map"
 
   # "<branch>\t<ws_id>", first space wins if two spaces share a branch
@@ -74,8 +76,19 @@ gs_stacks_for_repo() {
   # shellcheck disable=SC2086
   gs_patch_lines "$root" "$trunk" $branches > "$patches"
   # shellcheck disable=SC2086
-  gs_commit_lines "$root" "$trunk" $branches \
-    | awk -v patchfile="$patches" -f "$DIR/infer.awk" > "$res"
+  gs_commit_lines "$root" "$trunk" $branches > "$oids"
+  awk -v patchfile="$patches" -v orphanfile="$orphans" -f "$DIR/infer.awk" "$oids" > "$res"
+
+  # Third tier, and the only one that survives a rebase which also resolved
+  # conflicts. Git calls are spent only on the branches the first two tiers left
+  # unparented, which is why the orphan list exists.
+  if [ -s "$orphans" ]; then
+    # shellcheck disable=SC2086
+    gs_fork_edges "$root" "$trunk" "$orphans" $branches > "$forks"
+    if [ -s "$forks" ]; then
+      awk -v patchfile="$patches" -v forkfile="$forks" -f "$DIR/infer.awk" "$oids" > "$res"
+    fi
+  fi
   [ -s "$res" ] || return 0
 
   # tokens

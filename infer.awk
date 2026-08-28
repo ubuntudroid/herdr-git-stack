@@ -8,6 +8,13 @@
 #      a rebase, so they still find it. An edge found this way is ALWAYS a restack:
 #      the parent's actual commits are provably absent from the child, or the
 #      commit-id pass would have found them.
+# opt: -v forkfile=FILE — "<child>\t<parent>" edges already verified by the caller
+#      via `git merge-base --fork-point`. Last resort, for a rebase that ALSO
+#      resolved conflicts: that changes the diff, so patch ids no longer match
+#      either. The caller proves each edge twice (a former tip of the parent that
+#      is also an ancestor of the child), which is why this cannot invent one.
+# opt: -v orphanfile=FILE — branches with commits beyond trunk and no parent are
+#      written here, so the caller knows which branches to spend git calls on.
 # out: "<branch>\t<parent|->\t<pos>\t<size>\t<restack 0|1>\t<root>"
 #      emitted only for branches in a stack of two or more branches
 #
@@ -22,6 +29,14 @@ BEGIN {
       powners[pf[2]] = powners[pf[2]] SUBSEP pf[1]
     }
     close(patchfile)
+  }
+  if (forkfile != "") {
+    while ((getline fline < forkfile) > 0) {
+      split(fline, ff, "\t")
+      if (ff[1] == "" || ff[2] == "") continue
+      forkparent[ff[1]] = ff[2]
+    }
+    close(forkfile)
   }
 }
 
@@ -92,6 +107,16 @@ END {
       if (best != "") { parent[ch] = best; restack[ch] = 1; continue }
     }
 
+    # Last resort: an edge the caller verified through the reflog. Still subject
+    # to the (depth, name) order, so it cannot introduce a cycle.
+    if (best == "" && dep[ch] > 0 && forkfile != "" && (ch in forkparent)) {
+      fp = forkparent[ch]
+      if (fp in dep && fp != ch \
+          && (dep[fp] < dep[ch] || (dep[fp] == dep[ch] && fp < ch))) {
+        parent[ch] = fp; restack[ch] = 1; continue
+      }
+    }
+
     parent[ch] = best
     # The parent holds commits the child lacks: the child needs a restack.
     restack[ch] = (best != "" && bs != dep[best]) ? 1 : 0
@@ -103,6 +128,11 @@ END {
     while (parent[r] != "") { r = parent[r]; hops++ }
     root[b] = r; pos[b] = hops; members[r]++
     if (hops > size[r]) size[r] = hops
+  }
+
+  if (orphanfile != "") {
+    for (b in dep) if (dep[b] > 0 && parent[b] == "") print b > orphanfile
+    close(orphanfile)
   }
 
   for (b in dep) {

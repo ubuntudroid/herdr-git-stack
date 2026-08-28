@@ -179,3 +179,33 @@ gs_patch_lines() {
       | awk -v b="$b" 'NF { print b "\t" $1 }'
   done
 }
+
+# gs_fork_edges <repo_root> <trunk> <orphan_file> <branch>...
+# "<child>\t<parent>" for orphans whose parent can still be identified through the
+# reflog. This is the only tier that survives a rebase which ALSO resolved
+# conflicts, because that changes the diff and so defeats patch ids too.
+#
+# Each edge is proved twice before it is emitted: `--fork-point` returns a commit
+# that was a former tip of the candidate, and it must also be an ancestor of the
+# child. Two independent constraints have to agree, which is why this cannot
+# fabricate a relationship the way matching on commit subjects can. A fork point
+# that is merely on trunk is not a stack edge and is discarded.
+gs_fork_edges() {
+  local root="$1" trunk="$2" orphans="$3" child cand fp best bestd d
+  shift 3
+  [ -s "$orphans" ] || return 0
+  while IFS= read -r child; do
+    [ -n "$child" ] || continue
+    best=""; bestd=0
+    for cand in "$@"; do
+      [ "$cand" != "$child" ] || continue
+      fp=$(git -C "$root" merge-base --fork-point "$cand" "$child" 2>/dev/null) || continue
+      [ -n "$fp" ] || continue
+      git -C "$root" merge-base --is-ancestor "$fp" "$child" 2>/dev/null || continue
+      d=$(git -C "$root" rev-list --count "$trunk..$fp" 2>/dev/null) || continue
+      case "$d" in ''|*[!0-9]*) continue ;; esac
+      [ "$d" -gt "$bestd" ] && { best="$cand"; bestd="$d"; }
+    done
+    [ -n "$best" ] && printf '%s\t%s\n' "$child" "$best"
+  done < "$orphans"
+}

@@ -72,6 +72,20 @@ gs_t_infer_p() {
   printf '%s' "$out"
 }
 
+# gs_t_infer_f <patch-specs|-> <fork-edges "child:parent ..."> <commit-spec>...
+# Adds the reflog-verified fork tier on top of the patch-id one.
+gs_t_infer_f() {
+  local pspec="$1" fspec="$2" pf ff e out
+  shift 2
+  pf="$(mktemp)"; ff="$(mktemp)"
+  [ "$pspec" = "-" ] || { # shellcheck disable=SC2086
+    gs_t_commits $pspec > "$pf"; }
+  for e in $fspec; do printf '%s\t%s\n' "${e%%:*}" "${e#*:}" >> "$ff"; done
+  out="$(gs_t_commits "$@" | awk -v patchfile="$pf" -v forkfile="$ff" -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
+  rm -f "$pf" "$ff"
+  printf '%s' "$out"
+}
+
 # Every fixture git call runs with global and system config neutralized: a
 # developer's commit.gpgsign or core.hooksPath would otherwise break these
 # commits, and this suite ships to machines we do not control. Per-command
@@ -177,6 +191,23 @@ feat-c feat-b 3 3 0 feat-a' \
   # commit ids AND no shared patch ids means no edge, fallback or not.
   gs_assert 'unrelated branches stay unrelated under the fallback' '' \
     "$(gs_t_infer_p 'feat-a:pa feat-b:pb' 'feat-a:a1' 'feat-b:b1')"
+
+  # A rebase that ALSO resolved conflicts changes the diff, so patch ids miss too.
+  # Only a reflog-verified edge is left. It is always a restack by construction.
+  gs_assert 'conflict-resolved rebase: recovered by a fork edge' \
+'feat-a - 1 2 0 feat-a
+feat-b feat-a 2 2 1 feat-a' \
+    "$(gs_t_infer_f 'feat-a:pa2 feat-b:pa1,pb' 'feat-b:feat-a' 'feat-a:a2' 'feat-b:a1,b1')"
+
+  # Without the fork edge the same input yields nothing — proving the edge, not
+  # something else, is what recovers the stack.
+  gs_assert 'conflict-resolved rebase: nothing without the fork edge' '' \
+    "$(gs_t_infer_p 'feat-a:pa2 feat-b:pa1,pb' 'feat-a:a2' 'feat-b:a1,b1')"
+
+  # A fork edge pointing the wrong way round the (depth, name) order is refused,
+  # so a bad edge cannot introduce a cycle.
+  gs_assert 'fork edge violating the depth order is ignored' '' \
+    "$(gs_t_infer_f '-' 'feat-a:feat-b' 'feat-a:a1' 'feat-b:b1,b2')"
 
   gs_assert 'empty input' '' "$(printf '' | awk -f "$DIR/infer.awk")"
 }
@@ -313,6 +344,52 @@ feat-c feat-b 3 3 0 feat-a' \
        | awk -v patchfile="$pf2" -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
   rm -f "$pf2"
   rm -rf "$rb"
+
+  # --- a rebase that ALSO resolved conflicts -------------------------------
+  # main and the parent touch the same file, so rebasing the parent forces a
+  # resolution. That rewrites the diff, so patch ids stop matching as well —
+  # the case neither shipped tier can see, and the one the reflog tier exists
+  # for. Never covered before.
+  local cb cr
+  cb="$(readlink -f "$(mktemp -d)")"
+  GS_T_HOME="$cb"
+  gs_t_git init -q -b main "$cb/repo" || { gs_assert 'conflict fixture built' 'yes' 'no'; rm -rf "$cb"; return 1; }
+  cr="$cb/repo"
+  ( cd "$cr"
+    printf 'base\n' > f.txt; gs_t_git add -A; gs_t_git commit -qm m1
+    gs_t_git checkout -qb feat-a; printf 'parent-change\n' > f.txt; gs_t_git add -A; gs_t_git commit -qm 'parent work'
+    gs_t_git checkout -qb feat-b; printf 'child\n' > g.txt; gs_t_git add -A; gs_t_git commit -qm 'child work'
+    gs_t_git checkout -q main; printf 'trunk-change\n' > f.txt; gs_t_git add -A; gs_t_git commit -qm m2
+    gs_t_git checkout -q feat-a
+    gs_t_git rebase main >/dev/null 2>&1 || {
+      printf 'resolved\n' > f.txt; gs_t_git add f.txt
+      GIT_EDITOR=true gs_t_git rebase --continue >/dev/null 2>&1; }
+  ) >/dev/null 2>&1
+
+  local cpf cof cff
+  cpf="$(mktemp)"; cof="$(mktemp)"; cff="$(mktemp)"
+  gs_patch_lines "$cr" main feat-a feat-b > "$cpf"
+
+  gs_assert 'conflict rebase defeats patch ids too' '0' \
+    "$(comm -12 <(awk -F'\t' '$1=="feat-a"{print $2}' "$cpf" | sort) \
+                <(awk -F'\t' '$1=="feat-b"{print $2}' "$cpf" | sort) | wc -l | tr -d ' ')"
+
+  gs_commit_lines "$cr" main feat-a feat-b > "$cof"
+  gs_assert 'conflict rebase: no stack from the first two tiers' '' \
+    "$(awk -v patchfile="$cpf" -f "$DIR/infer.awk" "$cof" | sort | tr '\t' ' ')"
+
+  awk -v patchfile="$cpf" -v orphanfile="$cff.orphans" -f "$DIR/infer.awk" "$cof" >/dev/null
+  gs_fork_edges "$cr" main "$cff.orphans" feat-a feat-b > "$cff"
+  gs_assert 'reflog yields a verified edge' 'feat-b feat-a' \
+    "$(tr '\t' ' ' < "$cff")"
+
+  gs_assert 'conflict rebase: recovered by the fork tier and flagged' \
+'feat-a - 1 2 0 feat-a
+feat-b feat-a 2 2 1 feat-a' \
+    "$(awk -v patchfile="$cpf" -v forkfile="$cff" -f "$DIR/infer.awk" "$cof" | sort | tr '\t' ' ')"
+
+  rm -f "$cpf" "$cof" "$cff" "$cff.orphans"
+  rm -rf "$cb"
 }
 
 # gs_t_moves <stacks-newline-string> <order-newline-string>
