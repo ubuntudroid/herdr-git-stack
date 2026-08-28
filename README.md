@@ -3,12 +3,23 @@
 Shows where each space sits in its git branch stack, in the spaces sidebar:
 
 ```
- ┌1/3 · sven-con2-80-add-th…
- ├2/3 · sven-con2-82-put-the…
- └3/3 󱓎 · sven-con2-85-batch…
+● ┌1/3 · add-the-paywall-cta
+  │ · CON2-80
+  │ · sven-con2-80-add-th…
+● ├2/3 · put-the-cta-behind…
+  │ · CON2-82
+  │ · sven-con2-82-put-the…
+● ├3/3 󱓎 · batch-the-cta-events
+  │ · CON2-85
+  └ · sven-con2-85-batch…
 ```
 
-`┌` root, `├` middle, `└` deepest, `2/3` the position in a three-branch stack.
+A space fills several sidebar rows, so the bracket is drawn by one token per
+row. `stack` heads the first row: `┌` opens the bracket on the root, `├` marks
+every deeper member, and `2/3` is the position in a three-branch stack.
+`stack_tail` closes the last row: `│` carries the line on, `└` ends it under the
+deepest branch. An optional `stack_bar_<name>` carries the line through each row
+in between. Together they wrap the whole stack in one unbroken bracket.
 `󱓎` means the parent branch has moved and this branch needs a restack.
 
 Stack members are also kept contiguous in sidebar order, root first, so a stack
@@ -53,26 +64,69 @@ anything:
 GIT_STACK_DRYRUN=1 ./poller-ctl.sh poll-once
 ```
 
-This prints the token each stacked space would get and any moves that would
-be applied, and writes nothing.
+This prints the tokens each stacked space would get and any moves that would be
+applied, and writes nothing.
 
 ## Configure the sidebar
 
-The plugin publishes a `stack` metadata token; herdr only renders it if your
-layout asks for it. Add `$stack` to `~/.config/herdr/config.toml`:
+The plugin publishes `stack` and `stack_tail` metadata tokens; herdr only
+renders them if your layout asks for them. Put `$stack` right after
+`state_icon` on your top row and `$stack_tail` first on your bottom one, in
+`~/.config/herdr/config.toml`:
 
 ```toml
 [ui.sidebar.spaces]
 rows = [
-  ["state_icon", "workspace"],
-  [{ token = "$stack", fg = "#89b4fa" }, "branch", "git_status"],
+  ["state_icon", { token = "$stack", fg = "#89b4fa" }, "workspace"],
+  [{ token = "$stack_tail", fg = "#89b4fa" }, "branch", "git_status"],
 ]
 ```
 
 Then `herdr server reload-config`.
 
-Sharing the branch row costs about 8 columns. To give the token its own row,
-add `[{ token = "$stack" }]` as a separate entry instead.
+Those two positions line up on purpose: herdr indents every row after the first
+by exactly the two columns `state_icon` occupies, so a head placed after the
+state icon and a tail leading its own row land in the same column. Do not try
+to nudge them with spaces — herdr trims token values.
+
+Sharing those rows costs about 8 columns on the first and 2 on the last. To give
+the head its own row, add `[{ token = "$stack" }]` as a separate entry instead.
+
+## Rows in the middle
+
+With more than two rows configured, the line breaks across the rows in between.
+Close the gap by declaring one connector per middle row in
+`bars.conf`, under the plugin's config directory
+(`~/.config/herdr/plugins/config/ubuntudroid.git-stack/` on Linux and macOS):
+
+```
+# <name>: <metadata token name>...
+coder: coder_icon coder_ticket
+session: coder
+```
+
+Each line publishes `stack_bar_<name>` as a `│`, and the tokens after the colon
+are the condition: the bar is set only for a space that already carries one of
+them, and cleared for one that does not. Use `always` for a row that is never
+empty. Then reference them in the matching rows:
+
+```toml
+rows = [
+  ["state_icon", { token = "$stack", fg = "#89b4fa" }, "workspace"],
+  [{ token = "$stack_bar_coder", fg = "#89b4fa" }, "$coder_icon", "$coder_ticket"],
+  [{ token = "$stack_bar_session", fg = "#89b4fa" }, "$coder"],
+  [{ token = "$stack_tail", fg = "#89b4fa" }, "branch", "git_status"],
+]
+```
+
+The condition is the whole point. herdr draws a row when any one of its tokens
+resolves, so an unconditional bar would turn every otherwise-blank middle row
+into a bare `│`. Naming that row's real tokens keeps the row collapsed for
+spaces that have nothing to put on it.
+
+Bars cost one extra `workspace list` read per tick, and only when `bars.conf`
+exists. They also depend on another plugin's tokens being live, so a bar follows
+whatever publishes them.
 
 Optional keybinding:
 
@@ -104,7 +158,8 @@ Consequences worth knowing:
 - Branching stacks: two branches stacked on the same base both render as
   middle-of-stack (e.g. two `├2/3`s), not as separate leaves, and the counter
   reflects the depth of the deepest chain in the component, not the number of
-  members.
+  members. The bracket still closes exactly once, on whichever member sits at
+  the bottom of the block.
 
 ## Environment
 
@@ -113,12 +168,13 @@ Consequences worth knowing:
 | `GIT_STACK_REFRESH` | `3` | poll interval in seconds |
 | `GIT_STACK_TTL_MS` | `9000` | token TTL; tokens vanish if the poller dies |
 | `GIT_STACK_DRYRUN` | unset | print intended writes instead of applying them |
+| `GIT_STACK_CONFIG_DIR` | `$HERDR_PLUGIN_CONFIG_DIR` | where `bars.conf` is read from |
 
 ## Tests
 
 ```bash
 ./test.sh          # everything except herdr and poll
-./test.sh infer    # one group: token, infer, git, moves, stacks, herdr, poll
+./test.sh infer    # one group: token, infer, git, trunk, bracket, bars, moves, stacks, herdr, poll
 ```
 
 `herdr` and `poll` both touch a **live herdr session**: each creates and

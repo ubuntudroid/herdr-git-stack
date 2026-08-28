@@ -10,6 +10,7 @@
 #   GIT_STACK_TTL_MS    token TTL in ms (default 9000)
 #   GIT_STACK_DRYRUN    if set, print intended writes instead of applying them
 #   GIT_STACK_STATE_DIR override the state directory (tests)
+#   GIT_STACK_CONFIG_DIR override the config directory holding bars.conf (tests)
 #
 # Control (cont.): fingerprint prints the change-detection string, read-only.
 set -uo pipefail
@@ -56,7 +57,7 @@ gs_preflight() {
 }
 
 # gs_stacks_for_repo <repo_root> <trunk> <ws_tsv_for_this_repo>
-# Writes "<ws_id>\t<token>" to $STATE_DIR/tokens.txt and one stack per line
+# Writes "<ws_id>\t<head>\t<tail>" to $STATE_DIR/tokens.txt and one stack per line
 # ("<ws1> <ws2> ...", stack order) to $STATE_DIR/stacks.txt.
 gs_stacks_for_repo() {
   local root="$1" trunk="$2" wsfile="$3"
@@ -98,20 +99,31 @@ gs_stacks_for_repo() {
   fi
   [ -s "$res" ] || return 0
 
-  # tokens
-  local b par pos size restack rootb tok wsid
-  while IFS=$'\t' read -r b par pos size restack rootb; do
-    tok=$(gs_token "$pos" "$size" "$restack") || continue
-    wsid=$(awk -F'\t' -v b="$b" '$1 == b { print $2; exit }' "$map")
-    [ -n "$wsid" ] && printf '%s\t%s\n' "$wsid" "$tok" >> "$STATE_DIR/tokens.txt"
-  done < "$res"
-
   # stacks, ordered by position within each component. Sort first (root, then
   # position numerically, then branch name) so stacks.awk can accumulate in
   # read order instead of keying by (root, pos), which drops same-depth
   # siblings — see stacks.awk for why that matters.
-  sort -t"$(printf '\t')" -k6,6 -k3,3n -k1,1 "$res" \
-    | awk -f "$DIR/stacks.awk" "$map" - >> "$STATE_DIR/stacks.txt"
+  local sorted="$STATE_DIR/sorted.tsv" closers="$STATE_DIR/closers.txt"
+  sort -t"$(printf '\t')" -k6,6 -k3,3n -k1,1 "$res" > "$sorted"
+  awk -f "$DIR/stacks.awk" "$map" "$sorted" >> "$STATE_DIR/stacks.txt"
+
+  # The one member per component that ends up at the bottom of the sidebar
+  # block, which is where the bracket has to close. Read off the same sorted
+  # file the move planner consumes, so the glyph cannot disagree with the order
+  # the spaces are actually drawn in.
+  awk -F'\t' '{ last[$6] = $1 } END { for (r in last) print last[r] }' \
+    "$sorted" > "$closers"
+
+  # tokens
+  local b par pos size restack rootb tok tail closes wsid
+  while IFS=$'\t' read -r b par pos size restack rootb; do
+    tok=$(gs_token "$pos" "$size" "$restack") || continue
+    closes=0
+    grep -qxF "$b" "$closers" && closes=1
+    tail=$(gs_token_tail "$size" "$closes") || continue
+    wsid=$(awk -F'\t' -v b="$b" '$1 == b { print $2; exit }' "$map")
+    [ -n "$wsid" ] && printf '%s\t%s\t%s\n' "$wsid" "$tok" "$tail" >> "$STATE_DIR/tokens.txt"
+  done < "$res"
 }
 
 # Recompute structure and apply moves. Gated on the fingerprint by gs_run,
@@ -162,14 +174,32 @@ gs_recompute() {
 # silently dropped.
 gs_publish() {
   local seq="${1:-$(date +%s)}"
-  local snap="$STATE_DIR/ws.tsv" wsid tok rk root path
+  local snap="$STATE_DIR/ws.tsv" wsid tok tail rk root path
   [ -f "$snap" ] || return 0
 
-  while IFS=$'\t' read -r wsid tok; do
+  # The middle-row bars are conditional on tokens OTHER plugins publish, so one
+  # extra listing read per tick is what decides them. Skipped entirely when no
+  # bar is configured, which is the default.
+  local groups="$STATE_DIR/bars.tsv" present="$STATE_DIR/wstokens.tsv" names line
+  local -a bars=()
+  gs_bar_groups > "$groups"
+  : > "$present"
+  [ -s "$groups" ] && gs_ws_tokens > "$present"
+
+  while IFS=$'\t' read -r wsid tok tail; do
+    bars=()
+    if [ -s "$groups" ]; then
+      names="$(awk -F'\t' -v w="$wsid" '$1 == w { print $2; exit }' "$present")"
+      while IFS= read -r line; do bars+=("$line"); done < <(gs_bar_args "$names" < "$groups")
+    fi
     if [ -n "$DRYRUN" ]; then
-      printf 'token %s %s\n' "$wsid" "$tok"
+      # No trailing space when no bar is configured: `printf ' %s'` with an
+      # empty list still runs its format once.
+      printf 'token %s %s %s' "$wsid" "$tok" "$tail"
+      [ "${#bars[@]}" -eq 0 ] || printf ' %s' "${bars[@]}"
+      printf '\n'
     else
-      gs_set_token "$wsid" "$tok" "$seq"
+      gs_set_token "$wsid" "$tok" "$tail" "$seq" ${bars[@]+"${bars[@]}"}
     fi
   done < "$STATE_DIR/tokens.txt"
 

@@ -31,15 +31,25 @@ gs_summary() {
 test_token() {
   gs_assert 'root of 3'        '┌1/3'    "$(gs_token 1 3 0)"
   gs_assert 'middle of 3'      '├2/3'    "$(gs_token 2 3 0)"
-  gs_assert 'leaf of 3'        '└3/3'    "$(gs_token 3 3 0)"
-  gs_assert 'leaf needs restack' '└3/3 󱓎' "$(gs_token 3 3 1)"
+  # The leaf's head is `├`, not `└`: the bracket closes on its TAIL row, one
+  # row lower, so that the stack reads as one line wrapping every member.
+  gs_assert 'leaf of 3'        '├3/3'    "$(gs_token 3 3 0)"
+  gs_assert 'leaf needs restack' '├3/3 󱓎' "$(gs_token 3 3 1)"
   gs_assert 'middle needs restack' '├2/3 󱓎' "$(gs_token 2 3 1)"
   gs_assert 'root of 2'        '┌1/2'    "$(gs_token 1 2 0)"
-  gs_assert 'leaf of 2'        '└2/2'    "$(gs_token 2 2 0)"
+  gs_assert 'leaf of 2'        '├2/2'    "$(gs_token 2 2 0)"
   # a single-node stack is never rendered
   gs_assert 'size 1 is empty'  ''        "$(gs_token 1 1 0)"
   gs_token 1 1 0 >/dev/null 2>&1
   gs_assert 'size 1 returns 1' '1'       "$?"
+
+  # Tails: every member carries the line on, one member closes it.
+  gs_assert 'tail carries on'  '│'       "$(gs_token_tail 3 0)"
+  gs_assert 'tail closes'      '└'       "$(gs_token_tail 3 1)"
+  gs_assert 'tail closes in a pair' '└'  "$(gs_token_tail 2 1)"
+  gs_assert 'tail size 1 is empty' ''    "$(gs_token_tail 1 1)"
+  gs_token_tail 1 1 >/dev/null 2>&1
+  gs_assert 'tail size 1 returns 1' '1'  "$?"
   gs_assert 'unknown group exits 2' '2' \
     "$("$DIR/test.sh" definitely-not-a-group >/dev/null 2>&1; echo $?)"
 
@@ -631,17 +641,25 @@ test_herdr() {
   gs_assert 'created a test workspace' 'yes' \
     "$([ -n "$ws" ] && [ "$ws" != "null" ] && echo yes || echo no)"
 
-  gs_set_token "$ws" '├2/3 󱓎' 1
-  tok="$("${HERDR_BIN_PATH:-herdr}" workspace list \
-         | jq -r --arg w "$ws" '(.result.workspaces // .workspaces)[]
-                                | select(.workspace_id == $w) | .tokens.stack')"
-  gs_assert 'token round trip keeps the glyph' '├2/3 󱓎' "$tok"
+  local jq_parts='(.result.workspaces // .workspaces)[]
+                  | select(.workspace_id == $w)
+                  | "\(.tokens.stack)|\(.tokens.stack_bar_x)|\(.tokens.stack_tail)"'
+  gs_set_token "$ws" '├2/3 󱓎' '│' 1 --token "stack_bar_x=│"
+  tok="$("${HERDR_BIN_PATH:-herdr}" workspace list | jq -r --arg w "$ws" "$jq_parts")"
+  # Head, bar and tail in one round trip: herdr trims token values, so a glyph
+  # that ever came back padded or empty would leave the bracket broken on
+  # screen. The bar is passed as an extra arg, which is how gs_publish adds the
+  # conditional ones.
+  gs_assert 'token round trip keeps every glyph' '├2/3 󱓎|│|│' "$tok"
 
+  # gs_clear_token derives the bar names from bars.conf, so point it at one.
+  local saved_cfg="$GS_CONFIG_DIR" cfgdir
+  cfgdir="$(mktemp -d)"; printf 'x: always\n' > "$cfgdir/bars.conf"
+  GS_CONFIG_DIR="$cfgdir"
   gs_clear_token "$ws" 2
-  tok="$("${HERDR_BIN_PATH:-herdr}" workspace list \
-         | jq -r --arg w "$ws" '(.result.workspaces // .workspaces)[]
-                                | select(.workspace_id == $w) | .tokens.stack')"
-  gs_assert 'token cleared' 'null' "$tok"
+  GS_CONFIG_DIR="$saved_cfg"; rm -rf "$cfgdir"
+  tok="$("${HERDR_BIN_PATH:-herdr}" workspace list | jq -r --arg w "$ws" "$jq_parts")"
+  gs_assert 'every token cleared, bars included' 'null|null|null' "$tok"
 
   gs_assert 'test workspace appears in the order' 'yes' \
     "$(gs_order | grep -qx "$ws" && echo yes || echo no)"
@@ -697,7 +715,7 @@ test_poll() {
   # slow machine into a flaky failure here.
   local saved_ttl="$GS_TTL_MS"
   GS_TTL_MS=60000
-  gs_set_token "$pws" '┌1/2' 1
+  gs_set_token "$pws" '┌1/2' '│' 1
   GS_TTL_MS="$saved_ttl"
 
   local tok_before tok_after ord_before ord_after
@@ -817,16 +835,16 @@ test_trunk() {
   gs_t_herdr_stub "$bin" "$json"
 
   # Token order within a recompute is awk array order, so compare sorted.
-  out="$(GIT_STACK_DRYRUN=1 GIT_STACK_STATE_DIR="$sd" HERDR_BIN_PATH="$bin" \
-         "$DIR/poller-ctl.sh" poll-once 2>/dev/null | sort)"
+  out="$(GIT_STACK_DRYRUN=1 GIT_STACK_STATE_DIR="$sd" GIT_STACK_CONFIG_DIR="$base" \
+         HERDR_BIN_PATH="$bin" "$DIR/poller-ctl.sh" poll-once 2>/dev/null | sort)"
 
   # The trunk space is cleared, and the three real stack members keep their
   # positions — proving the trunk was dropped, not that inference stopped.
   gs_assert 'trunk space forms no stack, real stack survives' \
 'clear wmain
-token wa ┌1/3
-token wb ├2/3
-token wc └3/3' \
+token wa ┌1/3 │
+token wb ├2/3 │
+token wc ├3/3 └' \
     "$out"
 
   # No move either: a phantom stack would have dragged wmain into the block.
@@ -850,6 +868,111 @@ token wc └3/3' \
   rm -rf "$base" "$sd"
 }
 
+# A branching stack has two members at the same deepest position, so closing
+# the bracket on depth would draw `└` twice and leave the line running on
+# underneath. The closer is whichever member the sort puts LAST, and this runs
+# the real poller to prove the glyph agrees with the order the spaces get.
+test_bracket() {
+  if ! { nc -h 2>&1 || true; } | grep -q -- '-U'; then
+    printf 'SKIP bracket group: this nc has no -U support, so poll-once cannot preflight\n' >&2
+    return 0
+  fi
+  local base r sd bin json out
+  base="$(mktemp -d)"; base=$(readlink -f "$base"); GS_T_HOME="$base"
+  r="$base/repo"
+  gs_t_git init -q -b main "$r" || { gs_assert 'bracket fixture built' 'yes' 'no'; rm -rf "$base"; return 1; }
+  (
+    cd "$r" || exit 1
+    gs_t_c() {
+      echo "$1" > "$1.txt"
+      gs_t_git add -A && gs_t_git commit -qm "$1"
+    }
+    gs_t_c m1 || exit 1
+    gs_t_git checkout -qb feat-a && gs_t_c a1 || exit 1
+    gs_t_git checkout -qb feat-b && gs_t_c b1 || exit 1
+    gs_t_git checkout -q feat-a || exit 1
+    gs_t_git checkout -qb feat-d && gs_t_c d1 || exit 1
+    gs_t_git checkout -q main || exit 1
+    gs_t_git worktree add -q "$base/wt-a" feat-a || exit 1
+    gs_t_git worktree add -q "$base/wt-b" feat-b || exit 1
+    gs_t_git worktree add -q "$base/wt-d" feat-d || exit 1
+  ) || { gs_assert 'bracket fixture built' 'yes' 'no'; rm -rf "$base"; return 1; }
+  GS_T_REPO="$r"
+  gs_t_git -C "$r" update-ref refs/remotes/origin/main "$(gs_t_git -C "$r" rev-parse main)"
+  gs_t_git -C "$r" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+
+  sd="$(mktemp -d)"; bin="$base/herdr"; json="$base/ws.json"
+  gs_t_ws_json "$json" "wa:$base/wt-a" "wb:$base/wt-b" "wd:$base/wt-d"
+  gs_t_herdr_stub "$bin" "$json"
+  out="$(GIT_STACK_DRYRUN=1 GIT_STACK_STATE_DIR="$sd" GIT_STACK_CONFIG_DIR="$base" \
+         HERDR_BIN_PATH="$bin" "$DIR/poller-ctl.sh" poll-once 2>/dev/null | grep '^token ' | sort)"
+
+  # feat-b and feat-d are both at position 2 of 2. Only feat-d, last by name and
+  # therefore last in the sidebar block, closes the bracket.
+  gs_assert 'a fork closes the bracket once, on the last space' \
+'token wa ┌1/2 │
+token wb ├2/2 │
+token wd ├2/2 └' \
+    "$out"
+
+  gs_assert 'exactly one closing glyph' '1' \
+    "$(printf '%s\n' "$out" | grep -c '└$' | tr -d ' ')"
+
+  rm -rf "$base" "$sd"
+}
+
+# The middle-row bars exist to draw an unbroken line without making rows appear
+# that would otherwise be blank, so what matters is that a bar is published for
+# a space whose row has content and cleared for one whose row does not.
+test_bars() {
+  local cd out saved_cfg="$GS_CONFIG_DIR"
+  cd="$(mktemp -d)"
+  # GS_CONFIG_DIR resolves GIT_STACK_CONFIG_DIR once, when lib.sh is sourced, so
+  # in-process tests set the resolved variable the way test_poll sets GS_TTL_MS.
+  # The poll-once tests pass the env var instead: those fork a fresh shell.
+  GS_CONFIG_DIR="$cd"
+
+  gs_assert 'no config means no bars' '' "$(gs_bar_groups)"
+
+  cat > "$cd/bars.conf" <<'CONF'
+# comment
+coder: coder_icon coder_ticket
+session : coder
+row3: always
+bad-name: coder
+: coder
+noargs:
+CONF
+  gs_assert 'parses names, trims space, drops junk' \
+'coder	coder_icon coder_ticket
+session	coder
+row3	always' \
+    "$(gs_bar_groups)"
+
+  # A Coder space: both Coder rows have content, so both bars are set.
+  out="$(gs_bar_groups | gs_bar_args 'coder_icon coder_ticket coder ci_ok' | tr '\n' ' ')"
+  gs_assert 'a filled row gets its bar' \
+    '--token stack_bar_coder=│ --token stack_bar_session=│ --token stack_bar_row3=│ ' "$out"
+
+  # A stacked non-Coder space carries CI tokens but no Coder ones, so the two
+  # Coder rows stay empty and must NOT be forced to render.
+  out="$(gs_bar_groups | gs_bar_args 'ci_ok review_approved' | tr '\n' ' ')"
+  gs_assert 'an empty row gets its bar cleared' \
+    '--clear-token stack_bar_coder --clear-token stack_bar_session --token stack_bar_row3=│ ' "$out"
+
+  # A space with no tokens at all is the same case, and `always` still holds.
+  out="$(gs_bar_groups | gs_bar_args '' | tr '\n' ' ')"
+  gs_assert 'no tokens clears every conditional bar' \
+    '--clear-token stack_bar_coder --clear-token stack_bar_session --token stack_bar_row3=│ ' "$out"
+
+  # Substring safety: "coder" must not be matched by a token merely containing it.
+  out="$(printf 'x\tcoder\n' | gs_bar_args 'coder_icon' | tr '\n' ' ')"
+  gs_assert 'trigger match is whole-token, not substring' '--clear-token stack_bar_x ' "$out"
+
+  GS_CONFIG_DIR="$saved_cfg"
+  rm -rf "$cd"
+}
+
 # Note: preflight is not unit-tested. `PATH=/nonexistent` cannot reach it,
 # because the `#!/usr/bin/env bash` shebang resolves bash through PATH and
 # fails at exec with 127 first. Verify it by hand instead, e.g. by temporarily
@@ -867,6 +990,12 @@ case "$GROUP" in
 esac
 case "$GROUP" in
   trunk|all) test_trunk ;;
+esac
+case "$GROUP" in
+  bracket|all) test_bracket ;;
+esac
+case "$GROUP" in
+  bars|all) test_bars ;;
 esac
 case "$GROUP" in
   moves|all) test_moves ;;

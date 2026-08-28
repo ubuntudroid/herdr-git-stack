@@ -4,18 +4,37 @@
 
 GS_SOURCE="git-stack"
 GS_TOKEN_NAME="stack"
+GS_BAR_TOKEN_PREFIX="stack_bar_"
+GS_TAIL_TOKEN_NAME="stack_tail"
 GS_GLYPH_RESTACK="󱓎"
+GS_GLYPH_BAR="│"
+GS_CONFIG_DIR="${GIT_STACK_CONFIG_DIR:-${HERDR_PLUGIN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/ubuntudroid.git-stack}}"
+
+# A space occupies several sidebar rows, so the bracket is drawn by a token per
+# row: `stack` heads the first, `stack_tail` closes the last, and an optional
+# `stack_bar_<name>` carries the line through each row between. Together they
+# turn what used to be one glyph per space into a single unbroken line running
+# down the whole stack, opening above the root and closing below the deepest
+# member.
+#
+# The middle bars are opt-in, and each one is CONDITIONAL, because a bar on a
+# row whose other tokens are all empty would make that row appear -- herdr draws
+# a row when any one of its tokens resolves, so an unconditional bar turns every
+# otherwise-blank middle row into a bare `│`. Each bar therefore names the
+# tokens that fill its row, and is published only for spaces that carry one.
+# See gs_bar_groups for the file that declares them.
 
 # gs_token <pos> <size> <restack 0|1>
-# Prints the sidebar token. Returns 1 with no output for a single-node stack,
-# which must never be rendered.
+# The head: bracket glyph plus position, for the space's FIRST sidebar row.
+# `└` is deliberately absent here -- it belongs to gs_token_tail, because the
+# bracket closes below the deepest branch's last row, not beside its first.
+# Returns 1 with no output for a single-node stack, which must never be
+# rendered.
 gs_token() {
   local pos="$1" size="$2" restack="$3" glyph
   [ "$size" -ge 2 ] || return 1
   if [ "$pos" -eq 1 ]; then
     glyph='┌'
-  elif [ "$pos" -eq "$size" ]; then
-    glyph='└'
   else
     glyph='├'
   fi
@@ -23,6 +42,25 @@ gs_token() {
     printf '%s%s/%s %s\n' "$glyph" "$pos" "$size" "$GS_GLYPH_RESTACK"
   else
     printf '%s%s/%s\n' "$glyph" "$pos" "$size"
+  fi
+}
+
+# gs_token_tail <size> <closes 0|1>
+# The tail: the connector for the space's LAST sidebar row. Every member
+# continues the line with `│`; the one member that closes it gets `└`. Same
+# single-node contract as gs_token.
+#
+# `closes` is decided by SIDEBAR ORDER, not by depth. In a branching stack two
+# members can share the deepest position, and closing on depth would then draw
+# `└` twice, mid-block, with the line carrying on underneath it. The caller
+# passes 1 for whichever member the move planner puts last.
+gs_token_tail() {
+  local size="$1" closes="$2"
+  [ "$size" -ge 2 ] || return 1
+  if [ "$closes" = "1" ]; then
+    printf '└\n'
+  else
+    printf '%s\n' "$GS_GLYPH_BAR"
   fi
 }
 
@@ -142,21 +180,96 @@ gs_order() {
     (.result.workspaces // .workspaces)[] | .workspace_id'
 }
 
-# gs_set_token <ws_id> <value> <seq>
+# gs_bar_groups
+# One line per configured middle-row connector, as "<name>\t<trigger tokens>".
+# Read from $GS_CONFIG_DIR/bars.conf, whose format is one
+#
+#     <name>: <metadata token name>...
+#
+# per line, or `<name>: always` for a row that is never empty. Blank lines and
+# `#` comments are ignored, and a name outside [A-Za-z0-9_] is skipped rather
+# than pasted into a token name. Prints nothing when the file is absent, which
+# is the two-row default: no bars, nothing published, nothing to configure.
+gs_bar_groups() {
+  local f="$GS_CONFIG_DIR/bars.conf" line name rest
+  [ -f "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    case "$line" in *:*) ;; *) continue ;; esac
+    name="${line%%:*}"; rest="${line#*:}"
+    name="$(printf '%s' "$name" | tr -d '[:space:]')"
+    case "$name" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    rest="$(printf '%s' "$rest" | tr -s '[:space:]' ' ')"
+    rest="${rest# }"; rest="${rest% }"
+    [ -n "$rest" ] || continue
+    printf '%s\t%s\n' "$name" "$rest"
+  done < "$f"
+}
+
+# gs_bar_args <present token names, space separated>
+# The --token/--clear-token pairs for every configured bar, given the tokens a
+# space already carries. Cleared rather than omitted when a trigger is absent:
+# a space that stops being, say, a Coder space would otherwise keep its bar for
+# the rest of the TTL.
+gs_bar_args() {
+  local present=" $1 " name triggers t hit
+  while IFS=$'\t' read -r name triggers; do
+    hit=0
+    if [ "$triggers" = "always" ]; then
+      hit=1
+    else
+      for t in $triggers; do
+        case "$present" in *" $t "*) hit=1; break ;; esac
+      done
+    fi
+    if [ "$hit" = 1 ]; then
+      printf '%s\n%s\n' '--token' "$GS_BAR_TOKEN_PREFIX$name=$GS_GLYPH_BAR"
+    else
+      printf '%s\n%s\n' '--clear-token' "$GS_BAR_TOKEN_PREFIX$name"
+    fi
+  done
+}
+
+# gs_ws_tokens -> "<ws_id>\t<name> <name> ..." for spaces carrying metadata
+# tokens. Non-empty values only: herdr drops an empty one on the way in, but a
+# listing read mid-write should not be trusted to have done so.
+gs_ws_tokens() {
+  "$GS_HERDR" workspace list 2>/dev/null | jq -r '
+    (.result.workspaces // .workspaces)[]
+    | select((.tokens // {}) | length > 0)
+    | [.workspace_id,
+       (.tokens | to_entries | map(select(.value != "") | .key) | join(" "))]
+    | @tsv'
+}
+
+# gs_set_token <ws_id> <head> <tail> <seq> [extra report-metadata args...]
+# Every part of the bracket goes in one report: a space that showed a head with
+# no tail for even one tick would draw a line that stops in mid-air.
 # TTL means a dead daemon's tokens disappear on their own within a few ticks.
 gs_set_token() {
-  "$GS_HERDR" workspace report-metadata "$1" \
+  local ws="$1" head="$2" tail="$3" seq="$4"
+  shift 4
+  "$GS_HERDR" workspace report-metadata "$ws" \
     --source "$GS_SOURCE" \
-    --token "$GS_TOKEN_NAME=$2" \
-    --seq "$3" \
+    --token "$GS_TOKEN_NAME=$head" \
+    --token "$GS_TAIL_TOKEN_NAME=$tail" \
+    "$@" \
+    --seq "$seq" \
     --ttl-ms "$GS_TTL_MS" >/dev/null 2>&1
 }
 
 # gs_clear_token <ws_id> <seq>
 gs_clear_token() {
+  local name triggers
+  local -a extra=()
+  while IFS=$'\t' read -r name triggers; do
+    extra+=(--clear-token "$GS_BAR_TOKEN_PREFIX$name")
+  done < <(gs_bar_groups)
   "$GS_HERDR" workspace report-metadata "$1" \
     --source "$GS_SOURCE" \
     --clear-token "$GS_TOKEN_NAME" \
+    --clear-token "$GS_TAIL_TOKEN_NAME" \
+    "${extra[@]+"${extra[@]}"}" \
     --seq "$2" >/dev/null 2>&1
 }
 
