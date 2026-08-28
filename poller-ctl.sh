@@ -10,6 +10,8 @@
 #   GIT_STACK_TTL_MS    token TTL in ms (default 9000)
 #   GIT_STACK_DRYRUN    if set, print intended writes instead of applying them
 #   GIT_STACK_STATE_DIR override the state directory (tests)
+#
+# Control (cont.): fingerprint prints the change-detection string, read-only.
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$DIR/lib.sh"
@@ -18,8 +20,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # this from a shell it is unset, and falling back to $DIR/.state would put state
 # under the plugin root (which the design forbids) AND give the shell a different
 # state dir from the running daemon — so `stop` would print "stopped" and do
-# nothing. Fall back to the same XDG location herdr itself uses.
-STATE_DIR="${GIT_STACK_STATE_DIR:-${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/git-stack}}"
+# nothing. Fall back to the same XDG location herdr itself uses — the last path
+# component is the plugin id from herdr-plugin.toml and must be kept in step
+# with it, or `status` and `stop` from a shell silently address a directory the
+# daemon never writes to.
+STATE_DIR="${GIT_STACK_STATE_DIR:-${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/ubuntudroid.git-stack}}"
 PIDFILE="$STATE_DIR/poller.pid"
 LOGFILE="$STATE_DIR/poller.log"
 STOPFILE="$STATE_DIR/stopped"
@@ -61,9 +66,11 @@ gs_stacks_for_repo() {
   : > "$map"
 
   # "<branch>\t<ws_id>", first space wins if two spaces share a branch
-  local id rk r path branch
+  local id rk r path branch trunkb
+  trunkb=$(gs_trunk_local "$trunk")
   while IFS=$'\t' read -r id rk r path; do
     branch=$(gs_head_branch "$path") || continue
+    [ "$branch" = "$trunkb" ] && continue
     awk -F'\t' -v b="$branch" '$1 == b { found = 1 } END { exit !found }' "$map" && continue
     printf '%s\t%s\n' "$branch" "$id" >> "$map"
   done < "$wsfile"
@@ -193,7 +200,7 @@ gs_publish() {
 # back. Sorting these lines "for stability" would make a drag invisible to
 # the fingerprint and silently kill that behavior.
 gs_fingerprint() {
-  local snap="$STATE_DIR/ws.tsv" id rk root path branch
+  local snap="$STATE_DIR/ws.tsv" id rk root path branch t
   gs_workspaces > "$snap" 2>/dev/null || return 0
   while IFS=$'\t' read -r id rk root path; do
     branch=$(gs_head_branch "$path") || branch="-"
@@ -201,6 +208,13 @@ gs_fingerprint() {
   done < "$snap"
   awk -F'\t' '{ print $3 }' "$snap" | sort -u | while IFS= read -r root; do
     git -C "$root" for-each-ref --format='%(refname:short) %(objectname)' refs/heads 2>/dev/null
+    # The trunk is usually a remote-tracking ref, so a fetch or a push moves it
+    # without touching refs/heads. Depth is measured FROM the trunk, so a stack
+    # can collapse the moment it moves — without this line the last computed
+    # tokens would keep being republished until some local branch happened to
+    # change. One rev-parse per repo, not for-each-ref over refs/remotes: a
+    # large remote would make that expensive on every tick.
+    t=$(gs_trunk "$root") && git -C "$root" rev-parse "$t" 2>/dev/null
   done
 }
 
@@ -269,8 +283,14 @@ case "${1:-}" in
     gs_recompute
     gs_publish "$(date +%s)"
     ;;
+  fingerprint)
+    # Read-only toward herdr; it does refresh ws.tsv in the state dir. Exposed
+    # so "did this change trigger a recompute?" is answerable without a
+    # stopwatch — by hand, and by the trunk test group.
+    gs_fingerprint
+    ;;
   *)
-    echo "usage: $0 {start|stop|toggle|ensure|status|poll-once|run}" >&2
+    echo "usage: $0 {start|stop|toggle|ensure|status|poll-once|fingerprint|run}" >&2
     exit 2
     ;;
 esac

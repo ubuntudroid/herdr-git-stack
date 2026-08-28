@@ -42,6 +42,13 @@ test_token() {
   gs_assert 'size 1 returns 1' '1'       "$?"
   gs_assert 'unknown group exits 2' '2' \
     "$("$DIR/test.sh" definitely-not-a-group >/dev/null 2>&1; echo $?)"
+
+  # The shell fallback state dir is only useful if it names the same directory
+  # herdr hands the daemon, and herdr derives that from the manifest id. Once
+  # they drift, `stop` from a shell prints "stopped" and leaves the daemon up.
+  gs_assert 'shell state dir matches the plugin id' \
+    "$(awk -F'"' '/^id *=/ { print $2; exit }' "$DIR/herdr-plugin.toml")" \
+    "$(grep -o 'herdr/plugins/[A-Za-z0-9._-]*' "$DIR/poller-ctl.sh" | head -1 | sed 's|.*/||')"
 }
 
 # Emits "<branch>\t<commit>" lines from a compact spec: "branch:c1,c2,c3"
@@ -244,6 +251,10 @@ test_git() {
   r="$(gs_t_fixture "$base")" || { gs_assert 'fixture built' 'yes' 'no'; rm -rf "$base"; return 1; }
 
   gs_assert 'trunk resolves to main' 'main' "$(gs_trunk "$r")"
+
+  gs_assert 'trunk-local of a remote ref'  'main'        "$(gs_trunk_local origin/main)"
+  gs_assert 'trunk-local of a local ref'   'main'        "$(gs_trunk_local main)"
+  gs_assert 'trunk-local keeps inner slashes' 'release/2.0' "$(gs_trunk_local origin/release/2.0)"
 
   # the main checkout has a .git directory
   gs_assert 'gitdir of main checkout' "$r/.git" "$(gs_gitdir "$r")"
@@ -748,6 +759,97 @@ test_poll() {
   rm -rf "$sd"
 }
 
+# A `herdr` stand-in for the dry-run path: the only subcommand the poller reads
+# is `workspace list`, and DRYRUN suppresses every write, so a script that
+# prints a canned listing is a complete herdr for this purpose. Lets the real
+# gs_recompute run end to end without a live session.
+gs_t_herdr_stub() {
+  local bin="$1" json="$2"
+  cat > "$bin" <<STUB
+#!/usr/bin/env bash
+if [ "\$1" = "workspace" ] && [ "\$2" = "list" ]; then cat "$json"; fi
+exit 0
+STUB
+  chmod +x "$bin"
+}
+
+# gs_t_ws_json <file> <ws_id>:<checkout_path> ...
+# Sidebar order is listing order.
+gs_t_ws_json() {
+  local out="$1" spec first=1
+  shift
+  printf '{"result":{"workspaces":[' > "$out"
+  for spec in "$@"; do
+    [ "$first" = 1 ] || printf ',' >> "$out"
+    first=0
+    printf '{"workspace_id":"%s","worktree":{"repo_key":"%s","repo_root":"%s","checkout_path":"%s"}}' \
+      "${spec%%:*}" "$GS_T_REPO/.git" "$GS_T_REPO" "${spec#*:}" >> "$out"
+  done
+  printf ']}}\n' >> "$out"
+}
+
+# A space sitting on the trunk is not a stack member. The regression: a
+# fast-forward merge of a feature branch into local main, in the seconds before
+# the push moves origin/main, leaves the two branches with identical commits and
+# identical depth — and the equal-depth tie-break then made one the parent of
+# the other, so both spaces got a "1/2" / "2/2" token for a stack that does not
+# exist. Runs the real poller, not a re-implementation of its filter.
+test_trunk() {
+  if ! { nc -h 2>&1 || true; } | grep -q -- '-U'; then
+    printf 'SKIP trunk group: this nc has no -U support, so poll-once cannot preflight\n' >&2
+    return 0
+  fi
+  local base r sd bin json out
+  base="$(mktemp -d)"; base=$(readlink -f "$base"); GS_T_HOME="$base"
+  r="$(gs_t_fixture "$base")" || { gs_assert 'trunk fixture built' 'yes' 'no'; rm -rf "$base"; return 1; }
+  GS_T_REPO="$r"
+
+  # A remote trunk one commit behind, then main fast-forwarded onto feat-a:
+  # main and feat-a now hold the same single commit beyond origin/main.
+  gs_t_git -C "$r" update-ref refs/remotes/origin/main "$(gs_t_git -C "$r" rev-parse main)"
+  gs_t_git -C "$r" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  gs_t_git -C "$r" update-ref refs/heads/main "$(gs_t_git -C "$r" rev-parse feat-a)"
+
+  gs_assert 'fixture trunk is the remote ref' 'origin/main' "$(gs_trunk "$r")"
+
+  sd="$(mktemp -d)"; bin="$base/herdr"; json="$base/ws.json"
+  gs_t_ws_json "$json" "wmain:$r" "wa:$base/wt-a" "wb:$base/wt-b" "wc:$base/wt-c"
+  gs_t_herdr_stub "$bin" "$json"
+
+  # Token order within a recompute is awk array order, so compare sorted.
+  out="$(GIT_STACK_DRYRUN=1 GIT_STACK_STATE_DIR="$sd" HERDR_BIN_PATH="$bin" \
+         "$DIR/poller-ctl.sh" poll-once 2>/dev/null | sort)"
+
+  # The trunk space is cleared, and the three real stack members keep their
+  # positions — proving the trunk was dropped, not that inference stopped.
+  gs_assert 'trunk space forms no stack, real stack survives' \
+'clear wmain
+token wa ┌1/3
+token wb ├2/3
+token wc └3/3' \
+    "$out"
+
+  # No move either: a phantom stack would have dragged wmain into the block.
+  gs_assert 'no move is planned' '' \
+    "$(printf '%s\n' "$out" | grep '^move ' || true)"
+
+  # Depth is measured from the trunk, so a fetch or a push that moves it can
+  # collapse a stack — but it touches refs/remotes only, and the fingerprint
+  # used to hash refs/heads alone. That is what let a wrong token survive for
+  # hours: nothing local changed, so no recompute ever ran.
+  local fp1 fp2
+  fp1="$(GIT_STACK_STATE_DIR="$sd" HERDR_BIN_PATH="$bin" "$DIR/poller-ctl.sh" fingerprint)"
+  gs_assert 'fingerprint is stable while nothing moves' "$fp1" \
+    "$(GIT_STACK_STATE_DIR="$sd" HERDR_BIN_PATH="$bin" "$DIR/poller-ctl.sh" fingerprint)"
+
+  gs_t_git -C "$r" update-ref refs/remotes/origin/main "$(gs_t_git -C "$r" rev-parse feat-a)"
+  fp2="$(GIT_STACK_STATE_DIR="$sd" HERDR_BIN_PATH="$bin" "$DIR/poller-ctl.sh" fingerprint)"
+  gs_assert 'fingerprint notices the trunk moving' 'differs' \
+    "$([ "$fp1" != "$fp2" ] && echo differs || echo same)"
+
+  rm -rf "$base" "$sd"
+}
+
 # Note: preflight is not unit-tested. `PATH=/nonexistent` cannot reach it,
 # because the `#!/usr/bin/env bash` shebang resolves bash through PATH and
 # fails at exec with 127 first. Verify it by hand instead, e.g. by temporarily
@@ -762,6 +864,9 @@ case "$GROUP" in
 esac
 case "$GROUP" in
   git|all) test_git ;;
+esac
+case "$GROUP" in
+  trunk|all) test_trunk ;;
 esac
 case "$GROUP" in
   moves|all) test_moves ;;

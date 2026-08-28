@@ -45,6 +45,23 @@ gs_trunk() {
   return 1
 }
 
+# gs_trunk_local <trunk>
+# The local branch name behind a trunk ref: "origin/main" -> "main",
+# "main" -> "main". A space sitting on the trunk is not a stack member. Without
+# this, a trunk that is momentarily identical to a feature branch — a
+# fast-forward merge, in the seconds before the push lands — has the same depth
+# and the same commits as that branch, so the equal-depth tie-break makes one
+# the parent of the other and a phantom two-branch stack appears.
+#
+# By name, never by tip: at the moment that happens the local trunk is AHEAD of
+# the remote trunk it is measured against, so comparing tips would not catch it.
+gs_trunk_local() {
+  case "$1" in
+    */*) printf '%s\n' "${1#*/}" ;;
+    *)   printf '%s\n' "$1" ;;
+  esac
+}
+
 # gs_gitdir <checkout_path>
 # A linked worktree's .git is a FILE containing "gitdir: <path>", not a
 # directory, so HEAD does not live at <checkout>/.git/HEAD.
