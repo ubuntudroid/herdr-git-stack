@@ -1,0 +1,29 @@
+id = "git-stack"
+name = "Git branch stacks"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Marks each space's position in its git branch stack in the spaces sidebar, flags branches whose parent has moved, and keeps each stack contiguous in sidebar order. Local commit graph only: no network, no forge API, no stacking tool."
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["bash", "poller-ctl.sh", "ensure"]
+
+[[actions]]
+id = "start"
+title = "Start git stack indicators"
+command = ["bash", "poller-ctl.sh", "start"]
+
+[[actions]]
+id = "stop"
+title = "Stop git stack indicators"
+command = ["bash", "poller-ctl.sh", "stop"]
+
+[[actions]]
+id = "toggle"
+title = "Toggle git stack indicators"
+command = ["bash", "poller-ctl.sh", "toggle"]
+
+[[actions]]
+id = "ensure"
+title = "Ensure the git stack poller is running"
+command = ["bash", "poller-ctl.sh", "ensure"]

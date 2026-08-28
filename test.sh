@@ -292,7 +292,79 @@ a')"
 b')"
 }
 
+# gs_t_stacks <infer-output-newline-string> <map-newline-string>
+# Sorts exactly the way gs_stacks_for_repo does before invoking stacks.awk,
+# so the test exercises the real sort+awk contract, not just the awk in
+# isolation. Input need not be pre-sorted by the caller.
+gs_t_stacks() {
+  local mf sf out
+  mf="$(mktemp)"; sf="$(mktemp)"
+  printf '%s\n' "$2" > "$mf"
+  printf '%s\n' "$1" | sort -t"$(printf '\t')" -k6,6 -k3,3n -k1,1 > "$sf"
+  out="$(awk -f "$DIR/stacks.awk" "$mf" "$sf")"
+  rm -f "$mf" "$sf"
+  printf '%s' "$out"
+}
+
+test_stacks() {
+  # linear three-branch component
+  gs_assert 'linear stack, all three in order' 'wA wB wC' \
+    "$(gs_t_stacks 'feat-a	-	1	3	0	feat-a
+feat-b	feat-a	2	3	0	feat-a
+feat-c	feat-b	3	3	0	feat-a' \
+'feat-a	wA
+feat-b	wB
+feat-c	wC')"
+
+  # Regression test for CRITICAL 2: feat-c, feat-d and feat-e are all
+  # siblings at position 3 under feat-b. The old pos[root,pos]-keyed awk
+  # overwrote same-depth siblings and emitted only 3 of these 5 ids
+  # (verified by hand: "wA wB wE", dropping wC and wD). All five must
+  # survive, ordered by position then branch name.
+  gs_assert 'branching component keeps every sibling' 'wA wB wC wD wE' \
+    "$(gs_t_stacks 'feat-a	-	1	3	0	feat-a
+feat-b	feat-a	2	3	0	feat-a
+feat-e	feat-b	3	3	0	feat-a
+feat-c	feat-b	3	3	0	feat-a
+feat-d	feat-b	3	3	0	feat-a' \
+'feat-a	wA
+feat-b	wB
+feat-c	wC
+feat-d	wD
+feat-e	wE')"
+
+  # a single-member component produces no line (stacks.awk's own guard,
+  # mirroring infer.awk's contract that a lone branch forms no stack)
+  gs_assert 'single-member component is empty' '' \
+    "$(gs_t_stacks 'feat-a	-	1	1	0	feat-a' 'feat-a	wA')"
+
+  # a branch in the infer output but absent from the map is skipped; the
+  # rest of the component is still emitted
+  gs_assert 'branch missing from map is skipped, rest survives' 'wA wC' \
+    "$(gs_t_stacks 'feat-a	-	1	3	0	feat-a
+feat-b	feat-a	2	3	0	feat-a
+feat-c	feat-b	3	3	0	feat-a' \
+'feat-a	wA
+feat-c	wC')"
+
+  # two independent components produce two lines
+  gs_assert 'two independent components, two lines' 'wX1 wX2
+wY1 wY2' \
+    "$(gs_t_stacks 'y1	-	1	2	0	y1
+x1	-	1	2	0	x1
+y2	y1	2	2	0	y1
+x2	x1	2	2	0	x1' \
+'x1	wX1
+x2	wX2
+y1	wY1
+y2	wY2')"
+}
+
 test_herdr() {
+  if [ "${GIT_STACK_LIVE_TESTS:-}" != "1" ]; then
+    printf 'SKIP herdr group: writes to the live herdr session (creates/closes a workspace, writes/clears tokens, reorders the sidebar). Set GIT_STACK_LIVE_TESTS=1 to run it.\n' >&2
+    return 0
+  fi
   local sock="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}" ws tok
   if [ ! -S "$sock" ]; then
     printf 'SKIP herdr group: no socket at %s\n' "$sock" >&2
@@ -355,6 +427,106 @@ test_herdr() {
     "$(gs_order | grep -qx "$ws" && echo yes || echo no)"
 }
 
+test_poll() {
+  if [ "${GIT_STACK_LIVE_TESTS:-}" != "1" ]; then
+    printf 'SKIP poll group: touches the live herdr session (creates and closes a throwaway workspace, writes/clears a token on it). Set GIT_STACK_LIVE_TESTS=1 to run it.\n' >&2
+    return 0
+  fi
+  local sock="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}" out
+  if [ ! -S "$sock" ]; then
+    printf 'SKIP poll group: no socket at %s\n' "$sock" >&2
+    return 0
+  fi
+
+  # Dry run must never write. It prints "token <ws> <value>", "clear <ws>"
+  # and "move <anchor> <ids...>" lines, or nothing when no space is stacked.
+  out="$(GIT_STACK_DRYRUN=1 "$DIR/poller-ctl.sh" poll-once 2>&1)"
+  gs_assert 'dry run exits clean' '0' "$?"
+  gs_assert 'dry run emits only token, clear and move lines' '' \
+    "$(printf '%s\n' "$out" | grep -v '^token ' | grep -v '^clear ' | grep -v '^move ' | grep -v '^$')"
+
+  # Shape-only checking would miss a stray un-gated write. Compare live state
+  # across the dry run: it must change neither tokens nor sidebar order. A
+  # known token on our own throwaway workspace gives the token comparison
+  # guaranteed discriminating power, independent of whether the user happens
+  # to have stacked branches open right now.
+  local pws
+  pws="$("${HERDR_BIN_PATH:-herdr}" workspace create --cwd /tmp --label gs-poll-selftest --no-focus \
+        | jq -r '.result.workspace.workspace_id // .workspace.workspace_id')"
+  gs_assert 'created the poll-group throwaway workspace' 'yes' \
+    "$([ -n "$pws" ] && [ "$pws" != "null" ] && echo yes || echo no)"
+  # Longer TTL than the default 9s: gs_recompute on a bigger repo could
+  # otherwise expire this before the after-snapshot is taken, turning a
+  # slow machine into a flaky failure here.
+  local saved_ttl="$GS_TTL_MS"
+  GS_TTL_MS=60000
+  gs_set_token "$pws" '┌1/2' 1
+  GS_TTL_MS="$saved_ttl"
+
+  local tok_before tok_after ord_before ord_after
+  tok_before="$("${HERDR_BIN_PATH:-herdr}" workspace list 2>/dev/null | jq -r '(.result.workspaces // .workspaces)[] | select(.tokens.stack != null) | "\(.workspace_id)=\(.tokens.stack)"' | sort | tr '\n' ' ')"
+  # The comparison below only has guaranteed discriminating power if our own
+  # token actually landed — assert that directly rather than trusting it.
+  gs_assert 'known token landed before the dry run' 'yes' \
+    "$(printf '%s' "$tok_before" | grep -q "$pws=┌1/2" && echo yes || echo no)"
+  ord_before="$(gs_order | tr '\n' ' ')"
+  GIT_STACK_DRYRUN=1 "$DIR/poller-ctl.sh" poll-once >/dev/null 2>&1
+  tok_after="$("${HERDR_BIN_PATH:-herdr}" workspace list 2>/dev/null | jq -r '(.result.workspaces // .workspaces)[] | select(.tokens.stack != null) | "\(.workspace_id)=\(.tokens.stack)"' | sort | tr '\n' ' ')"
+  ord_after="$(gs_order | tr '\n' ' ')"
+  gs_assert 'dry run writes no tokens' "$tok_before" "$tok_after"
+  gs_assert 'dry run does not reorder' "$ord_before" "$ord_after"
+
+  gs_clear_token "$pws" 2
+  "${HERDR_BIN_PATH:-herdr}" workspace close "$pws" >/dev/null 2>&1
+
+  gs_assert 'status reports stopped when no pidfile' 'stopped' \
+    "$(GIT_STACK_STATE_DIR="$(mktemp -d)" "$DIR/poller-ctl.sh" status)"
+
+  gs_assert 'unknown subcommand exits 2' '2' \
+    "$("$DIR/poller-ctl.sh" bogus >/dev/null 2>&1; echo $?)"
+
+  # A pidfile holding a live PID that is NOT our poller must read as stopped,
+  # not running — otherwise stop would signal an unrelated process.
+  local sd
+  sd="$(mktemp -d)"
+  echo "$$" > "$sd/poller.pid"
+  gs_assert 'foreign live PID reads as stopped' 'stopped' \
+    "$(GIT_STACK_STATE_DIR="$sd" "$DIR/poller-ctl.sh" status)"
+  rm -rf "$sd"
+
+  # A different plugin's poller-ctl.sh must never be mistaken for ours: same
+  # basename, different path. This is a real collision on machines that also
+  # run the CI-status plugin.
+  local dd dpid
+  dd="$(mktemp -d)"
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$dd/poller-ctl.sh"
+  chmod +x "$dd/poller-ctl.sh"
+  "$dd/poller-ctl.sh" run &
+  dpid=$!
+  echo "$dpid" > "$dd/poller.pid"
+  gs_assert 'another plugin poller-ctl.sh is not ours' 'stopped' \
+    "$(GIT_STACK_STATE_DIR="$dd" "$DIR/poller-ctl.sh" status)"
+  # kill just $dpid leaves its `sleep 30` child orphaned and running for the
+  # full 30s (verified empirically): bash does not propagate SIGTERM to a
+  # foreground child it is waiting on. Kill the child first, then the wrapper.
+  pkill -P "$dpid" 2>/dev/null
+  kill "$dpid" 2>/dev/null
+  wait "$dpid" 2>/dev/null
+  rm -rf "$dd"
+
+  # A deliberate stop must survive `ensure`, which is what the startup hook runs.
+  sd="$(mktemp -d)"
+  GIT_STACK_STATE_DIR="$sd" "$DIR/poller-ctl.sh" stop >/dev/null 2>&1
+  gs_assert 'ensure respects a deliberate stop' 'stopped' \
+    "$(GIT_STACK_STATE_DIR="$sd" "$DIR/poller-ctl.sh" ensure)"
+  rm -rf "$sd"
+}
+
+# Note: preflight is not unit-tested. `PATH=/nonexistent` cannot reach it,
+# because the `#!/usr/bin/env bash` shebang resolves bash through PATH and
+# fails at exec with 127 first. Verify it by hand instead, e.g. by temporarily
+# renaming nc, or trust it — it is a three-command guard.
+
 GROUP="${1:-all}"
 case "$GROUP" in
   token|all) test_token ;;
@@ -369,6 +541,12 @@ case "$GROUP" in
   moves|all) test_moves ;;
 esac
 case "$GROUP" in
+  stacks|all) test_stacks ;;
+esac
+case "$GROUP" in
   herdr|all) test_herdr ;;
+esac
+case "$GROUP" in
+  poll|all) test_poll ;;
 esac
 gs_summary

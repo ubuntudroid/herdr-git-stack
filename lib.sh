@@ -104,7 +104,7 @@ GS_HERDR="${HERDR_BIN_PATH:-herdr}"
 gs_socket() {
   local sock="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}" out
   [ -S "$sock" ] || return 1
-  out=$(printf '{"id":"gs","method":"%s","params":%s}\n' "$1" "$2" | nc -U "$sock" 2>/dev/null)
+  out=$(printf '{"id":"gs","method":"%s","params":%s}\n' "$1" "$2" | nc -U -w 5 "$sock" 2>/dev/null)
   [ -n "$out" ] || return 1
   printf '%s\n' "$out"
 }
