@@ -157,3 +157,25 @@ gs_move_block() {
   fi
   gs_socket workspace.move_block "$params"
 }
+
+GS_PATCHID_MAX="${GIT_STACK_PATCHID_MAX:-100}"
+
+# gs_patch_lines <repo_root> <trunk> <branch>...
+# "<branch>\t<patchid>" per commit in trunk..branch. Patch ids survive a rebase,
+# which commit ids do not, so this is what still finds a parent that was rebased
+# out from under its child. Branches with more than GS_PATCHID_MAX commits beyond
+# trunk are skipped: computing patch ids means diffing every commit, and a branch
+# that long is not a stack member in practice.
+gs_patch_lines() {
+  local root="$1" trunk="$2" b n
+  shift 2
+  for b in "$@"; do
+    n=$(git -C "$root" rev-list --count "$trunk..$b" 2>/dev/null) || continue
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    [ "$n" -gt 0 ] || continue
+    [ "$n" -le "$GS_PATCHID_MAX" ] || continue
+    git -C "$root" log --format='commit %H' -p --no-color "$trunk..$b" 2>/dev/null \
+      | git patch-id --stable 2>/dev/null \
+      | awk -v b="$b" 'NF { print b "\t" $1 }'
+  done
+}

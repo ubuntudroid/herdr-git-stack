@@ -58,6 +58,20 @@ gs_t_commits() {
 
 gs_t_infer() { gs_t_commits "$@" | awk -f "$DIR/infer.awk" | sort | tr '\t' ' '; }
 
+# gs_t_infer_p <patch-specs-string> <commit-spec>...
+# Same as gs_t_infer but also supplies a patch-id file, enabling the rebase
+# fallback. Patch specs use the same "branch:p1,p2" shape.
+gs_t_infer_p() {
+  local pspec="$1" pf out
+  shift
+  pf="$(mktemp)"
+  # shellcheck disable=SC2086
+  gs_t_commits $pspec > "$pf"
+  out="$(gs_t_commits "$@" | awk -v patchfile="$pf" -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
+  rm -f "$pf"
+  printf '%s' "$out"
+}
+
 # Every fixture git call runs with global and system config neutralized: a
 # developer's commit.gpgsign or core.hooksPath would otherwise break these
 # commits, and this suite ships to machines we do not control. Per-command
@@ -137,6 +151,32 @@ y3 y2 3 3 0 y1' \
 'feat-a - 1 2 0 feat-a
 feat-z feat-a 2 2 1 feat-a' \
     "$(gs_t_infer 'feat-a:a1,x1' 'feat-b:b1,y1' 'feat-z:a1,b1,z1')"
+
+  # A rebased parent rewrites every commit, so parent and child share NO commit
+  # ids and the commit-id pass finds no parent at all — the stack vanishes.
+  # This is the real-world case: rebasing the root of a two-branch stack.
+  gs_assert 'rebased parent: no stack without patch ids' '' \
+    "$(gs_t_infer 'feat-a:a2' 'feat-b:a1,b1')"
+
+  # With patch ids the parent is found again, and the edge is ALWAYS a restack:
+  # the parent's actual commits are provably absent from the child.
+  gs_assert 'rebased parent: patch ids recover the stack, flagged' \
+'feat-a - 1 2 0 feat-a
+feat-b feat-a 2 2 1 feat-a' \
+    "$(gs_t_infer_p 'feat-a:pa feat-b:pa,pb' 'feat-a:a2' 'feat-b:a1,b1')"
+
+  # The fallback must not override a parent the commit-id pass already found,
+  # nor invent restack flags on a healthy stack.
+  gs_assert 'patch ids do not disturb a healthy stack' \
+'feat-a - 1 3 0 feat-a
+feat-b feat-a 2 3 0 feat-a
+feat-c feat-b 3 3 0 feat-a' \
+    "$(gs_t_infer_p 'feat-a:pa feat-b:pa,pb feat-c:pa,pb,pc' 'feat-a:a1' 'feat-b:a1,b1' 'feat-c:a1,b1,c1')"
+
+  # Two branches that merely touch the same lines are not a stack: no shared
+  # commit ids AND no shared patch ids means no edge, fallback or not.
+  gs_assert 'unrelated branches stay unrelated under the fallback' '' \
+    "$(gs_t_infer_p 'feat-a:pa feat-b:pb' 'feat-a:a1' 'feat-b:b1')"
 
   gs_assert 'empty input' '' "$(printf '' | awk -f "$DIR/infer.awk")"
 }
@@ -233,6 +273,46 @@ feat-c feat-b 3 3 1 feat-a' \
   gs_assert 'fixture failure propagates' '1' "$?"
 
   rm -rf "$base"
+
+  # --- a genuinely rebased root, on real git ---------------------------------
+  # main gains a commit, the stack ROOT is rebased onto it, so its commit id is
+  # rewritten and the child — still built on the old one — shares NO commit ids
+  # with it. This removed a real stack from the sidebar on 2026-08-28. The
+  # original suite never covered it: its rebase fixture had a grandparent still
+  # supplying shared commits, so the zero-overlap case went untested.
+  local rb r2
+  rb="$(readlink -f "$(mktemp -d)")"
+  r2="$(gs_t_fixture "$rb")" || { gs_assert 'rebase fixture built' 'yes' 'no'; rm -rf "$rb"; return 1; }
+
+  ( cd "$r2" && gs_t_git checkout -q main && echo m2 > m2.txt \
+      && gs_t_git add -A && gs_t_git commit -qm m2 ) >/dev/null 2>&1
+  ( cd "$rb/wt-a" && gs_t_git rebase -q main ) >/dev/null 2>&1
+
+  gs_assert 'rebased root shares no commit ids with its child' '0' \
+    "$(comm -12 <(git -C "$r2" rev-list main..feat-a | sort) \
+                <(git -C "$r2" rev-list main..feat-b | sort) | wc -l | tr -d ' ')"
+
+  # Commit ids alone: feat-a drops out entirely, so feat-b/feat-c look like a
+  # two-branch stack rooted at feat-b.
+  gs_assert 'rebased root: lost by commit ids alone' \
+'feat-b - 1 2 0 feat-b
+feat-c feat-b 2 2 0 feat-b' \
+    "$(gs_commit_lines "$r2" main feat-a feat-b feat-c \
+       | awk -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
+
+  # Patch ids recover it: feat-a is the root again and feat-b is flagged for a
+  # restack, which is exactly the signal the glyph exists for.
+  local pf2
+  pf2="$(mktemp)"
+  gs_patch_lines "$r2" main feat-a feat-b feat-c > "$pf2"
+  gs_assert 'rebased root: recovered by patch ids and flagged' \
+'feat-a - 1 3 0 feat-a
+feat-b feat-a 2 3 1 feat-a
+feat-c feat-b 3 3 0 feat-a' \
+    "$(gs_commit_lines "$r2" main feat-a feat-b feat-c \
+       | awk -v patchfile="$pf2" -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
+  rm -f "$pf2"
+  rm -rf "$rb"
 }
 
 # gs_t_moves <stacks-newline-string> <order-newline-string>

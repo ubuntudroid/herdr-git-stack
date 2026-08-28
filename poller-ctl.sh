@@ -55,7 +55,7 @@ gs_preflight() {
 # ("<ws1> <ws2> ...", stack order) to $STATE_DIR/stacks.txt.
 gs_stacks_for_repo() {
   local root="$1" trunk="$2" wsfile="$3"
-  local map="$STATE_DIR/map.tsv" res="$STATE_DIR/infer.tsv" branches=""
+  local map="$STATE_DIR/map.tsv" res="$STATE_DIR/infer.tsv" patches="$STATE_DIR/patches.tsv" branches=""
   : > "$map"
 
   # "<branch>\t<ws_id>", first space wins if two spaces share a branch
@@ -69,8 +69,13 @@ gs_stacks_for_repo() {
   branches=$(awk -F'\t' '{print $1}' "$map")
   [ -n "$branches" ] || return 0
 
+  # Patch ids are the fallback that still finds a parent which was rebased out
+  # from under its child; see infer.awk. Computed per recompute, not per tick.
   # shellcheck disable=SC2086
-  gs_commit_lines "$root" "$trunk" $branches | awk -f "$DIR/infer.awk" > "$res"
+  gs_patch_lines "$root" "$trunk" $branches > "$patches"
+  # shellcheck disable=SC2086
+  gs_commit_lines "$root" "$trunk" $branches \
+    | awk -v patchfile="$patches" -f "$DIR/infer.awk" > "$res"
   [ -s "$res" ] || return 0
 
   # tokens
