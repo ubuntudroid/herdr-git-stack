@@ -128,6 +128,16 @@ y2 y1 2 3 0 y1
 y3 y2 3 3 0 y1' \
     "$(gs_t_infer 'x1:xa' 'x2:xa,xb' 'y1:ya' 'y2:ya,yb' 'y3:ya,yb,yc')"
 
+  # Tie-break tier 4: two candidates tied on score, containment AND depth, so
+  # only the branch-name comparison can decide. feat-a and feat-b each share
+  # exactly one commit with feat-z and neither contains it, and both have depth
+  # 2. The lexicographically smaller name must win. This is the only assertion
+  # that fails if `p < best` is flipped to `p > best` — verified by mutation.
+  gs_assert 'tie-break falls through to branch name' \
+'feat-a - 1 2 0 feat-a
+feat-z feat-a 2 2 1 feat-a' \
+    "$(gs_t_infer 'feat-a:a1,x1' 'feat-b:b1,y1' 'feat-z:a1,b1,z1')"
+
   gs_assert 'empty input' '' "$(printf '' | awk -f "$DIR/infer.awk")"
 }
 
