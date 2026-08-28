@@ -26,6 +26,12 @@ on Linux use BSD/OpenBSD netcat, not GNU `nc.traditional`.
 ## Install
 
 ```bash
+herdr plugin install ubuntudroid/herdr-git-stack
+```
+
+For local development, link a checkout instead:
+
+```bash
 herdr plugin link /path/to/herdr-git-stack
 ```
 
@@ -34,10 +40,10 @@ starts nothing visibly. Either restart herdr, or start the poller for the
 current session with:
 
 ```bash
-herdr plugin action invoke git-stack.start
+herdr plugin action invoke ubuntudroid.git-stack.start
 ```
 
-Stop it the same way with `herdr plugin action invoke git-stack.stop` (also
+Stop it the same way with `herdr plugin action invoke ubuntudroid.git-stack.stop` (also
 available as the optional keybinding below).
 
 Before enabling it, see what it would do to your sidebar without touching
@@ -74,7 +80,7 @@ Optional keybinding:
 [[keys.command]]
 key = "prefix+shift+s"
 type = "plugin_action"
-command = "git-stack.toggle"
+command = "ubuntudroid.git-stack.toggle"
 description = "toggle git stack indicators"
 ```
 
