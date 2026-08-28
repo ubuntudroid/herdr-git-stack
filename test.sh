@@ -390,6 +390,65 @@ feat-b feat-a 2 2 1 feat-a' \
 
   rm -f "$cpf" "$cof" "$cff" "$cff.orphans"
   rm -rf "$cb"
+
+  # --- a rebase that happened on ANOTHER machine ----------------------------
+  # An agent on a remote workspace (or GitHub's "update branch") rebases the
+  # parent and force-pushes; you fetch and reset. Commit ids and patch ids both
+  # miss, but pulling a force-pushed branch moves YOUR local ref, and git logs
+  # every ref update — so the old tip is in your reflog even though the rewrite
+  # happened elsewhere. This is the common case, not an exotic one, so it gets
+  # its own fixture rather than resting on the local-conflict case above.
+  local rd rl rr
+  rd="$(readlink -f "$(mktemp -d)")"
+  GS_T_HOME="$rd"
+  gs_t_git init -q --bare --initial-branch=main "$rd/origin.git" >/dev/null 2>&1
+  gs_t_git init -q -b main "$rd/seed" >/dev/null 2>&1
+  ( cd "$rd/seed"
+    printf 'base\n' > f.txt; gs_t_git add -A; gs_t_git commit -qm m1
+    gs_t_git remote add origin "$rd/origin.git"; gs_t_git push -q -u origin main ) >/dev/null 2>&1
+  gs_t_git clone -q "$rd/origin.git" "$rd/local" >/dev/null 2>&1
+  rl="$rd/local"
+  ( cd "$rl"
+    gs_t_git checkout -qb feat-a; printf 'parent-change\n' > f.txt; gs_t_git add -A
+    gs_t_git commit -qm 'parent work'; gs_t_git push -q -u origin feat-a
+    gs_t_git checkout -qb feat-b; printf 'child\n' > g.txt; gs_t_git add -A
+    gs_t_git commit -qm 'child work'; gs_t_git push -q -u origin feat-b
+    gs_t_git checkout -q main ) >/dev/null 2>&1
+  gs_t_git clone -q "$rd/origin.git" "$rd/remote" >/dev/null 2>&1
+  rr="$rd/remote"
+  ( cd "$rr"
+    gs_t_git checkout -q main; printf 'trunk-change\n' > f.txt; gs_t_git add -A
+    gs_t_git commit -qm m2; gs_t_git push -q origin main
+    gs_t_git checkout -q -b feat-a origin/feat-a
+    gs_t_git rebase main >/dev/null 2>&1 || {
+      printf 'resolved\n' > f.txt; gs_t_git add f.txt
+      GIT_EDITOR=true gs_t_git rebase --continue >/dev/null 2>&1; }
+    gs_t_git push -q --force origin feat-a ) >/dev/null 2>&1
+  ( cd "$rl"
+    gs_t_git fetch -q origin
+    gs_t_git checkout -q feat-a; gs_t_git reset --hard -q origin/feat-a
+    gs_t_git checkout -q feat-b; gs_t_git branch -q -f main origin/main ) >/dev/null 2>&1
+
+  local rpf rof rff
+  rpf="$(mktemp)"; rof="$(mktemp)"; rff="$(mktemp)"
+  gs_patch_lines "$rl" main feat-a feat-b > "$rpf"
+  gs_commit_lines "$rl" main feat-a feat-b > "$rof"
+
+  gs_assert 'remote rebase: first two tiers both miss' '' \
+    "$(awk -v patchfile="$rpf" -f "$DIR/infer.awk" "$rof" | sort | tr '\t' ' ')"
+
+  awk -v patchfile="$rpf" -v orphanfile="$rff.orphans" -f "$DIR/infer.awk" "$rof" >/dev/null
+  gs_fork_edges "$rl" main "$rff.orphans" feat-a feat-b > "$rff"
+  gs_assert 'remote rebase: your own reflog still holds the old tip' 'feat-b feat-a' \
+    "$(tr '\t' ' ' < "$rff")"
+
+  gs_assert 'remote rebase: recovered and flagged' \
+'feat-a - 1 2 0 feat-a
+feat-b feat-a 2 2 1 feat-a' \
+    "$(awk -v patchfile="$rpf" -v forkfile="$rff" -f "$DIR/infer.awk" "$rof" | sort | tr '\t' ' ')"
+
+  rm -f "$rpf" "$rof" "$rff" "$rff.orphans"
+  rm -rf "$rd"
 }
 
 # gs_t_moves <stacks-newline-string> <order-newline-string>
