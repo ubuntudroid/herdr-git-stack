@@ -310,6 +310,23 @@ gs_patch_lines() {
   done
 }
 
+# gs_birth_lines <repo_root> <branch>...
+# "<branch>\t<unixtime>" from the oldest surviving reflog entry, which is when
+# the branch was created. Two branches holding the same commit set carry no
+# ancestry evidence in the graph at all, so infer.awk breaks that tie by birth:
+# the branch created later is the child. Birth survives a restack — that rewrites
+# commits, never the ref's first reflog entry. A pruned or absent reflog emits
+# nothing and the tie falls back to branch name, as before.
+gs_birth_lines() {
+  local root="$1" b
+  shift
+  for b in "$@"; do
+    git -C "$root" reflog show --date=unix "$b" 2>/dev/null | tail -1 \
+      | awk -v b="$b" 'match($0, /@\{[0-9]+\}/) \
+          { print b "\t" substr($0, RSTART + 2, RLENGTH - 3) }'
+  done
+}
+
 # gs_fork_edges <repo_root> <trunk> <orphan_file> <branch>...
 # "<child>\t<parent>" for orphans whose parent can still be identified through the
 # reflog. This is the only tier that survives a rebase which ALSO resolved

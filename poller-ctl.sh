@@ -63,6 +63,7 @@ gs_stacks_for_repo() {
   local root="$1" trunk="$2" wsfile="$3"
   local map="$STATE_DIR/map.tsv" res="$STATE_DIR/infer.tsv" patches="$STATE_DIR/patches.tsv"
   local oids="$STATE_DIR/oids.tsv" orphans="$STATE_DIR/orphans.txt" forks="$STATE_DIR/forks.tsv"
+  local births="$STATE_DIR/births.tsv"
   : > "$orphans"; : > "$forks" branches=""
   : > "$map"
 
@@ -85,7 +86,12 @@ gs_stacks_for_repo() {
   gs_patch_lines "$root" "$trunk" $branches > "$patches"
   # shellcheck disable=SC2086
   gs_commit_lines "$root" "$trunk" $branches > "$oids"
-  awk -v patchfile="$patches" -v orphanfile="$orphans" -f "$DIR/infer.awk" "$oids" > "$res"
+  # Ref creation times, to order two branches that hold the same commit set and
+  # so are indistinguishable in the graph; see infer.awk.
+  # shellcheck disable=SC2086
+  gs_birth_lines "$root" $branches > "$births"
+  awk -v patchfile="$patches" -v birthfile="$births" -v orphanfile="$orphans" \
+    -f "$DIR/infer.awk" "$oids" > "$res"
 
   # Third tier, and the only one that survives a rebase which also resolved
   # conflicts. Git calls are spent only on the branches the first two tiers left
@@ -94,7 +100,8 @@ gs_stacks_for_repo() {
     # shellcheck disable=SC2086
     gs_fork_edges "$root" "$trunk" "$orphans" $branches > "$forks"
     if [ -s "$forks" ]; then
-      awk -v patchfile="$patches" -v forkfile="$forks" -f "$DIR/infer.awk" "$oids" > "$res"
+      awk -v patchfile="$patches" -v birthfile="$births" -v forkfile="$forks" \
+        -f "$DIR/infer.awk" "$oids" > "$res"
     fi
   fi
   [ -s "$res" ] || return 0

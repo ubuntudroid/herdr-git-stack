@@ -15,6 +15,10 @@
 #      is also an ancestor of the child), which is why this cannot invent one.
 # opt: -v orphanfile=FILE — branches with commits beyond trunk and no parent are
 #      written here, so the caller knows which branches to spend git calls on.
+# opt: -v birthfile=FILE — "<branch>\t<unixtime>" ref creation times. Only breaks
+#      ties in the eligibility order below: two branches holding the same commit
+#      set are indistinguishable in the graph, so the one created later is the
+#      child. Absent or partial, the order falls back to branch name.
 # out: "<branch>\t<parent|->\t<pos>\t<size>\t<restack 0|1>\t<root>"
 #      emitted only for branches in a stack of two or more branches
 #
@@ -30,6 +34,14 @@ BEGIN {
     }
     close(patchfile)
   }
+  if (birthfile != "") {
+    while ((getline bline < birthfile) > 0) {
+      split(bline, bf, "\t")
+      if (bf[1] == "" || bf[2] == "") continue
+      birth[bf[1]] = bf[2] + 0
+    }
+    close(birthfile)
+  }
   if (forkfile != "") {
     while ((getline fline < forkfile) > 0) {
       split(fline, ff, "\t")
@@ -43,6 +55,16 @@ BEGIN {
 {
   dep[$1]++
   owners[$2] = owners[$2] SUBSEP $1
+}
+
+# Strict total order on (depth, birth, name). Only a branch that is strictly
+# earlier in it may parent a later one, which is what keeps the result a forest.
+# Depth decides almost always; birth only speaks when two branches hold the same
+# commit set, where the graph itself says nothing; name is the final fallback.
+function earlier(p, c) {
+  if (dep[p] != dep[c]) return dep[p] < dep[c]
+  if (birth[p] + 0 != birth[c] + 0) return birth[p] + 0 < birth[c] + 0
+  return p < c
 }
 
 END {
@@ -75,8 +97,7 @@ END {
     best = ""; bs = 0; bc = 0; bd = 0
     for (p in dep) {
       if (p == ch) continue
-      # Strict total order on (depth, name) keeps the result a forest.
-      if (!(dep[p] < dep[ch] || (dep[p] == dep[ch] && p < ch))) continue
+      if (!earlier(p, ch)) continue
       sc = inter[p SUBSEP ch] + 0
       if (sc == 0) continue
       ct = (sc == dep[p]) ? 1 : 0
@@ -89,11 +110,11 @@ END {
     }
     # Fallback: no parent by commit id, but this branch has work beyond trunk.
     # Retry over patch ids — a rebased parent keeps them. Eligibility still uses
-    # the commit-id (depth, name) order, so the result stays a forest either way.
+    # the commit-id order, so the result stays a forest either way.
     if (best == "" && dep[ch] > 0 && patchfile != "") {
       for (p in dep) {
         if (p == ch) continue
-        if (!(dep[p] < dep[ch] || (dep[p] == dep[ch] && p < ch))) continue
+        if (!earlier(p, ch)) continue
         sc = pinter[p SUBSEP ch] + 0
         if (sc == 0) continue
         ct = (sc == pdep[p]) ? 1 : 0
@@ -108,11 +129,10 @@ END {
     }
 
     # Last resort: an edge the caller verified through the reflog. Still subject
-    # to the (depth, name) order, so it cannot introduce a cycle.
+    # to the eligibility order, so it cannot introduce a cycle.
     if (best == "" && dep[ch] > 0 && forkfile != "" && (ch in forkparent)) {
       fp = forkparent[ch]
-      if (fp in dep && fp != ch \
-          && (dep[fp] < dep[ch] || (dep[fp] == dep[ch] && fp < ch))) {
+      if (fp in dep && fp != ch && earlier(fp, ch)) {
         parent[ch] = fp; restack[ch] = 1; continue
       }
     }

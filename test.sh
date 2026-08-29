@@ -103,6 +103,20 @@ gs_t_infer_f() {
   printf '%s' "$out"
 }
 
+# gs_t_infer_b <birth-specs "branch:unixtime ..."> <commit-spec>...
+# Same as gs_t_infer with ref creation times supplied. Birth specs reuse the
+# "branch:value" shape, so gs_t_commits builds that file too.
+gs_t_infer_b() {
+  local bspec="$1" bf out
+  shift
+  bf="$(mktemp)"
+  # shellcheck disable=SC2086
+  gs_t_commits $bspec > "$bf"
+  out="$(gs_t_commits "$@" | awk -v birthfile="$bf" -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
+  rm -f "$bf"
+  printf '%s' "$out"
+}
+
 # Every fixture git call runs with global and system config neutralized: a
 # developer's commit.gpgsign or core.hooksPath would otherwise break these
 # commits, and this suite ships to machines we do not control. Per-command
@@ -225,6 +239,31 @@ feat-b feat-a 2 2 1 feat-a' \
   # so a bad edge cannot introduce a cycle.
   gs_assert 'fork edge violating the depth order is ignored' '' \
     "$(gs_t_infer_f '-' 'feat-a:feat-b' 'feat-a:a1' 'feat-b:b1,b2')"
+
+  # Two branches at the SAME tip hold identical commit sets, so the graph says
+  # nothing about which is the child and only the name order is left to decide.
+  # Here it decides wrong: con2-135 was branched off con2-84, but sorts first.
+  gs_assert 'same tip: name order picks the wrong parent' \
+'con2-135 con2-83 2 3 0 con2-83
+con2-83 - 1 3 0 con2-83
+con2-84 con2-135 3 3 0 con2-83' \
+    "$(gs_t_infer 'con2-83:a1' 'con2-84:a1,b1,b2' 'con2-135:a1,b1,b2')"
+
+  # Ref birth times break that tie on evidence instead: the branch created later
+  # is the child. Same input, correct stack, and no spurious restack flag.
+  gs_assert 'same tip: birth order puts the newer branch deeper' \
+'con2-135 con2-84 3 3 0 con2-83
+con2-83 - 1 3 0 con2-83
+con2-84 con2-83 2 3 0 con2-83' \
+    "$(gs_t_infer_b 'con2-83:100 con2-84:200 con2-135:300' \
+        'con2-83:a1' 'con2-84:a1,b1,b2' 'con2-135:a1,b1,b2')"
+
+  # Birth only speaks at equal depth: a branch born first but sitting deeper in
+  # the graph stays the child, or a restack would reshuffle every stack.
+  gs_assert 'birth never outranks depth' \
+'feat-a - 1 2 0 feat-a
+feat-b feat-a 2 2 0 feat-a' \
+    "$(gs_t_infer_b 'feat-a:900 feat-b:100' 'feat-a:a1' 'feat-b:a1,b1')"
 
   gs_assert 'empty input' '' "$(printf '' | awk -f "$DIR/infer.awk")"
 }
