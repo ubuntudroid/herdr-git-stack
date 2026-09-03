@@ -3,19 +3,27 @@
 # bash 3.2 compatible: no associative arrays, no mapfile.
 
 GS_SOURCE="git-stack"
-GS_TOKEN_NAME="stack"
-GS_BAR_TOKEN_PREFIX="stack_bar_"
-GS_TAIL_TOKEN_NAME="stack_tail"
+
+# herdr renders a token only if the user's ui.sidebar.spaces.rows asks for it by
+# name, and every plugin's tokens share ONE name space. Ours are prefixed
+# "gstk_" so they cannot collide with another plugin's — or with the bare
+# `stack`/`stack_tail`/`stack_bar_*` names this plugin published before 0.3.0.
+# GIT_STACK_TOKEN_PREFIX overrides the prefix; set it empty for those bare
+# names. Whatever it is must be mirrored in rows.
+GS_TOKEN_PREFIX="${GIT_STACK_TOKEN_PREFIX-gstk_}"
+GS_TOKEN_NAME="${GS_TOKEN_PREFIX}stack"
+GS_BAR_TOKEN_PREFIX="${GS_TOKEN_PREFIX}stack_bar_"
+GS_TAIL_TOKEN_NAME="${GS_TOKEN_PREFIX}stack_tail"
 GS_GLYPH_RESTACK="󱓎"
 GS_GLYPH_BAR="│"
 GS_CONFIG_DIR="${GIT_STACK_CONFIG_DIR:-${HERDR_PLUGIN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/ubuntudroid.git-stack}}"
 
 # A space occupies several sidebar rows, so the bracket is drawn by a token per
-# row: `stack` heads the first, `stack_tail` closes the last, and an optional
-# `stack_bar_<name>` carries the line through each row between. Together they
-# turn what used to be one glyph per space into a single unbroken line running
-# down the whole stack, opening above the root and closing below the deepest
-# member.
+# row: `gstk_stack` heads the first, `gstk_stack_tail` closes the last, and an
+# optional `gstk_stack_bar_<name>` carries the line through each row between.
+# Together they turn what used to be one glyph per space into a single unbroken
+# line running down the whole stack, opening above the root and closing below
+# the deepest member.
 #
 # The middle bars are opt-in, and each one is CONDITIONAL, because a bar on a
 # row whose other tokens are all empty would make that row appear -- herdr draws

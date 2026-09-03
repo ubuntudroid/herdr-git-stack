@@ -15,10 +15,10 @@ Shows where each space sits in its git branch stack, in the spaces sidebar:
 ```
 
 A space fills several sidebar rows, so the bracket is drawn by one token per
-row. `stack` heads the first row: `┌` opens the bracket on the root, `├` marks
+row. `gstk_stack` heads the first row: `┌` opens the bracket on the root, `├` marks
 every deeper member, and `2/3` is the position in a three-branch stack.
-`stack_tail` closes the last row: `│` carries the line on, `└` ends it under the
-deepest branch. An optional `stack_bar_<name>` carries the line through each row
+`gstk_stack_tail` closes the last row: `│` carries the line on, `└` ends it under the
+deepest branch. An optional `gstk_stack_bar_<name>` carries the line through each row
 in between. Together they wrap the whole stack in one unbroken bracket.
 `󱓎` means the parent branch has moved and this branch needs a restack.
 
@@ -69,16 +69,16 @@ applied, and writes nothing.
 
 ## Configure the sidebar
 
-The plugin publishes `stack` and `stack_tail` metadata tokens; herdr only
-renders them if your layout asks for them. Put `$stack` right after
-`state_icon` on your top row and `$stack_tail` first on your bottom one, in
+The plugin publishes `gstk_stack` and `gstk_stack_tail` metadata tokens; herdr only
+renders them if your layout asks for them. Put `$gstk_stack` right after
+`state_icon` on your top row and `$gstk_stack_tail` first on your bottom one, in
 `~/.config/herdr/config.toml`:
 
 ```toml
 [ui.sidebar.spaces]
 rows = [
-  ["state_icon", { token = "$stack", fg = "#89b4fa" }, "workspace"],
-  [{ token = "$stack_tail", fg = "#89b4fa" }, "branch", "git_status"],
+  ["state_icon", { token = "$gstk_stack", fg = "#89b4fa" }, "workspace"],
+  [{ token = "$gstk_stack_tail", fg = "#89b4fa" }, "branch", "git_status"],
 ]
 ```
 
@@ -90,7 +90,13 @@ state icon and a tail leading its own row land in the same column. Do not try
 to nudge them with spaces — herdr trims token values.
 
 Sharing those rows costs about 8 columns on the first and 2 on the last. To give
-the head its own row, add `[{ token = "$stack" }]` as a separate entry instead.
+the head its own row, add `[{ token = "$gstk_stack" }]` as a separate entry instead.
+
+**Token names are namespaced.** Every plugin's tokens share one name space, so
+each token this plugin publishes is prefixed `gstk_` and cannot collide with
+another plugin's. Override the prefix with `GIT_STACK_TOKEN_PREFIX` (see
+[Environment](#environment)) and mirror it in `rows`; set it to the empty string
+for the bare `stack` / `stack_tail` / `stack_bar_*` names published before 0.3.0.
 
 ## Rows in the middle
 
@@ -105,17 +111,17 @@ coder: coder_icon coder_ticket
 session: coder
 ```
 
-Each line publishes `stack_bar_<name>` as a `│`, and the tokens after the colon
+Each line publishes `gstk_stack_bar_<name>` as a `│`, and the tokens after the colon
 are the condition: the bar is set only for a space that already carries one of
 them, and cleared for one that does not. Use `always` for a row that is never
 empty. Then reference them in the matching rows:
 
 ```toml
 rows = [
-  ["state_icon", { token = "$stack", fg = "#89b4fa" }, "workspace"],
-  [{ token = "$stack_bar_coder", fg = "#89b4fa" }, "$coder_icon", "$coder_ticket"],
-  [{ token = "$stack_bar_session", fg = "#89b4fa" }, "$coder"],
-  [{ token = "$stack_tail", fg = "#89b4fa" }, "branch", "git_status"],
+  ["state_icon", { token = "$gstk_stack", fg = "#89b4fa" }, "workspace"],
+  [{ token = "$gstk_stack_bar_coder", fg = "#89b4fa" }, "$coder_icon", "$coder_ticket"],
+  [{ token = "$gstk_stack_bar_session", fg = "#89b4fa" }, "$coder"],
+  [{ token = "$gstk_stack_tail", fg = "#89b4fa" }, "branch", "git_status"],
 ]
 ```
 
@@ -169,6 +175,7 @@ Consequences worth knowing:
 | `GIT_STACK_TTL_MS` | `9000` | token TTL; tokens vanish if the poller dies |
 | `GIT_STACK_DRYRUN` | unset | print intended writes instead of applying them |
 | `GIT_STACK_CONFIG_DIR` | `$HERDR_PLUGIN_CONFIG_DIR` | where `bars.conf` is read from |
+| `GIT_STACK_TOKEN_PREFIX` | `gstk_` | prefix on every sidebar token name; mirror it in `rows`, empty for bare names |
 
 ## Tests
 

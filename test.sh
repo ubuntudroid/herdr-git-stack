@@ -53,6 +53,14 @@ test_token() {
   gs_assert 'unknown group exits 2' '2' \
     "$("$DIR/test.sh" definitely-not-a-group >/dev/null 2>&1; echo $?)"
 
+  # Token names are namespaced, and the override has to honour an EMPTY value
+  # (`-`, not `:-`) or there would be no way back to the pre-0.3.0 bare names.
+  gs_assert 'token names are namespaced' 'gstk_stack|gstk_stack_tail|gstk_stack_bar_' \
+    "$GS_TOKEN_NAME|$GS_TAIL_TOKEN_NAME|$GS_BAR_TOKEN_PREFIX"
+  gs_assert 'an empty prefix gives bare names' 'stack|stack_tail|stack_bar_' \
+    "$(GIT_STACK_TOKEN_PREFIX= bash -c '. "$1/lib.sh"; printf "%s|%s|%s" \
+       "$GS_TOKEN_NAME" "$GS_TAIL_TOKEN_NAME" "$GS_BAR_TOKEN_PREFIX"' _ "$DIR")"
+
   # The shell fallback state dir is only useful if it names the same directory
   # herdr hands the daemon, and herdr derives that from the manifest id. Once
   # they drift, `stop` from a shell prints "stopped" and leaves the daemon up.
@@ -682,8 +690,8 @@ test_herdr() {
 
   local jq_parts='(.result.workspaces // .workspaces)[]
                   | select(.workspace_id == $w)
-                  | "\(.tokens.stack)|\(.tokens.stack_bar_x)|\(.tokens.stack_tail)"'
-  gs_set_token "$ws" '├2/3 󱓎' '│' 1 --token "stack_bar_x=│"
+                  | "\(.tokens.gstk_stack)|\(.tokens.gstk_stack_bar_x)|\(.tokens.gstk_stack_tail)"'
+  gs_set_token "$ws" '├2/3 󱓎' '│' 1 --token "gstk_stack_bar_x=│"
   tok="$("${HERDR_BIN_PATH:-herdr}" workspace list | jq -r --arg w "$ws" "$jq_parts")"
   # Head, bar and tail in one round trip: herdr trims token values, so a glyph
   # that ever came back padded or empty would leave the bracket broken on
@@ -758,14 +766,14 @@ test_poll() {
   GS_TTL_MS="$saved_ttl"
 
   local tok_before tok_after ord_before ord_after
-  tok_before="$("${HERDR_BIN_PATH:-herdr}" workspace list 2>/dev/null | jq -r '(.result.workspaces // .workspaces)[] | select(.tokens.stack != null) | "\(.workspace_id)=\(.tokens.stack)"' | sort | tr '\n' ' ')"
+  tok_before="$("${HERDR_BIN_PATH:-herdr}" workspace list 2>/dev/null | jq -r '(.result.workspaces // .workspaces)[] | select(.tokens.gstk_stack != null) | "\(.workspace_id)=\(.tokens.gstk_stack)"' | sort | tr '\n' ' ')"
   # The comparison below only has guaranteed discriminating power if our own
   # token actually landed — assert that directly rather than trusting it.
   gs_assert 'known token landed before the dry run' 'yes' \
     "$(printf '%s' "$tok_before" | grep -q "$pws=┌1/2" && echo yes || echo no)"
   ord_before="$(gs_order | tr '\n' ' ')"
   GIT_STACK_DRYRUN=1 "$DIR/poller-ctl.sh" poll-once >/dev/null 2>&1
-  tok_after="$("${HERDR_BIN_PATH:-herdr}" workspace list 2>/dev/null | jq -r '(.result.workspaces // .workspaces)[] | select(.tokens.stack != null) | "\(.workspace_id)=\(.tokens.stack)"' | sort | tr '\n' ' ')"
+  tok_after="$("${HERDR_BIN_PATH:-herdr}" workspace list 2>/dev/null | jq -r '(.result.workspaces // .workspaces)[] | select(.tokens.gstk_stack != null) | "\(.workspace_id)=\(.tokens.gstk_stack)"' | sort | tr '\n' ' ')"
   ord_after="$(gs_order | tr '\n' ' ')"
   gs_assert 'dry run writes no tokens' "$tok_before" "$tok_after"
   gs_assert 'dry run does not reorder' "$ord_before" "$ord_after"
@@ -991,22 +999,22 @@ row3	always' \
   # A Coder space: both Coder rows have content, so both bars are set.
   out="$(gs_bar_groups | gs_bar_args 'coder_icon coder_ticket coder ci_ok' | tr '\n' ' ')"
   gs_assert 'a filled row gets its bar' \
-    '--token stack_bar_coder=│ --token stack_bar_session=│ --token stack_bar_row3=│ ' "$out"
+    '--token gstk_stack_bar_coder=│ --token gstk_stack_bar_session=│ --token gstk_stack_bar_row3=│ ' "$out"
 
   # A stacked non-Coder space carries CI tokens but no Coder ones, so the two
   # Coder rows stay empty and must NOT be forced to render.
   out="$(gs_bar_groups | gs_bar_args 'ci_ok review_approved' | tr '\n' ' ')"
   gs_assert 'an empty row gets its bar cleared' \
-    '--clear-token stack_bar_coder --clear-token stack_bar_session --token stack_bar_row3=│ ' "$out"
+    '--clear-token gstk_stack_bar_coder --clear-token gstk_stack_bar_session --token gstk_stack_bar_row3=│ ' "$out"
 
   # A space with no tokens at all is the same case, and `always` still holds.
   out="$(gs_bar_groups | gs_bar_args '' | tr '\n' ' ')"
   gs_assert 'no tokens clears every conditional bar' \
-    '--clear-token stack_bar_coder --clear-token stack_bar_session --token stack_bar_row3=│ ' "$out"
+    '--clear-token gstk_stack_bar_coder --clear-token gstk_stack_bar_session --token gstk_stack_bar_row3=│ ' "$out"
 
   # Substring safety: "coder" must not be matched by a token merely containing it.
   out="$(printf 'x\tcoder\n' | gs_bar_args 'coder_icon' | tr '\n' ' ')"
-  gs_assert 'trigger match is whole-token, not substring' '--clear-token stack_bar_x ' "$out"
+  gs_assert 'trigger match is whole-token, not substring' '--clear-token gstk_stack_bar_x ' "$out"
 
   GS_CONFIG_DIR="$saved_cfg"
   rm -rf "$cd"
