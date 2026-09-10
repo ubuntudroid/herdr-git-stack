@@ -63,16 +63,25 @@ gs_stacks_for_repo() {
   local root="$1" trunk="$2" wsfile="$3"
   local map="$STATE_DIR/map.tsv" res="$STATE_DIR/infer.tsv" patches="$STATE_DIR/patches.tsv"
   local oids="$STATE_DIR/oids.tsv" orphans="$STATE_DIR/orphans.txt" forks="$STATE_DIR/forks.tsv"
-  local births="$STATE_DIR/births.tsv"
+  local births="$STATE_DIR/births.tsv" behind="$STATE_DIR/behind.tsv"
   : > "$orphans"; : > "$forks" branches=""
   : > "$map"
 
   # "<branch>\t<ws_id>", first space wins if two spaces share a branch
-  local id rk r path branch trunkb
+  local id rk r path branch trunkb upstream
   trunkb=$(gs_trunk_local "$trunk")
+  gs_behind_upstreams "$root" > "$behind"
   while IFS=$'\t' read -r id rk r path; do
     branch=$(gs_head_branch "$path") || continue
+    # Trunk is matched on the LOCAL name and BEFORE the substitution below: a
+    # trunk sitting behind its own remote must still be excluded, or it becomes
+    # a phantom stack member — the case gs_trunk_local exists to prevent.
     [ "$branch" = "$trunkb" ] && continue
+    # A local ref behind its upstream is stale; measure the upstream instead.
+    # Everything downstream keys off whatever name lands in the map, so this is
+    # the only place that has to know. See gs_behind_upstreams.
+    upstream=$(awk -F'\t' -v b="$branch" '$1 == b { print $2; exit }' "$behind")
+    [ -n "$upstream" ] && branch="$upstream"
     awk -F'\t' -v b="$branch" '$1 == b { found = 1 } END { exit !found }' "$map" && continue
     printf '%s\t%s\n' "$branch" "$id" >> "$map"
   done < "$wsfile"
@@ -88,6 +97,11 @@ gs_stacks_for_repo() {
   gs_commit_lines "$root" "$trunk" $branches > "$oids"
   # Ref creation times, to order two branches that hold the same commit set and
   # so are indistinguishable in the graph; see infer.awk.
+  # ponytail: for a branch substituted by gs_behind_upstreams this reads the
+  # remote-tracking ref's reflog, so birth is first-fetch time, not branch
+  # creation. Birth only breaks ties between identical commit sets, which depth
+  # already decides in every substituted case seen so far; carry a local-name
+  # mapping through if that stops being true.
   # shellcheck disable=SC2086
   gs_birth_lines "$root" $branches > "$births"
   awk -v patchfile="$patches" -v birthfile="$births" -v orphanfile="$orphans" \
@@ -237,7 +251,7 @@ gs_publish() {
 # back. Sorting these lines "for stability" would make a drag invisible to
 # the fingerprint and silently kill that behavior.
 gs_fingerprint() {
-  local snap="$STATE_DIR/ws.tsv" id rk root path branch t
+  local snap="$STATE_DIR/ws.tsv" id rk root path branch
   gs_workspaces > "$snap" 2>/dev/null || return 0
   while IFS=$'\t' read -r id rk root path; do
     branch=$(gs_head_branch "$path") || branch="-"
@@ -245,13 +259,17 @@ gs_fingerprint() {
   done < "$snap"
   awk -F'\t' '{ print $3 }' "$snap" | sort -u | while IFS= read -r root; do
     git -C "$root" for-each-ref --format='%(refname:short) %(objectname)' refs/heads 2>/dev/null
-    # The trunk is usually a remote-tracking ref, so a fetch or a push moves it
-    # without touching refs/heads. Depth is measured FROM the trunk, so a stack
-    # can collapse the moment it moves — without this line the last computed
-    # tokens would keep being republished until some local branch happened to
-    # change. One rev-parse per repo, not for-each-ref over refs/remotes: a
-    # large remote would make that expensive on every tick.
-    t=$(gs_trunk "$root") && git -C "$root" rev-parse "$t" 2>/dev/null
+    # Remote-tracking refs move without touching refs/heads, and two separate
+    # things here are measured from them: the trunk that depth is counted from,
+    # and the upstream that gs_behind_upstreams substitutes for a stale local
+    # ref. A plain fetch changes either one, so without this line the last
+    # computed tokens keep being republished until some local branch happens to
+    # change — the "wrong token survived for hours" failure, see test_trunk.
+    # This used to be a single rev-parse of the trunk, avoiding for-each-ref on
+    # the theory that a large remote made it expensive. Measured instead: 845
+    # remote refs costs 17ms against 5ms for the rev-parse, ~2% of a 3s tick.
+    # A local trunk needs nothing here; refs/heads above already covers it.
+    git -C "$root" for-each-ref --format='%(refname:short) %(objectname)' refs/remotes 2>/dev/null
   done
 }
 

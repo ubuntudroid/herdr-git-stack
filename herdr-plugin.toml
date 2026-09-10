@@ -1,6 +1,6 @@
 id = "ubuntudroid.git-stack"
 name = "Git branch stacks"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.8.0"
 description = "Marks each space's position in its git branch stack in the spaces sidebar, flags branches whose parent has moved, and keeps each stack contiguous in sidebar order. Local commit graph only: no network, no forge API, no stacking tool."
 platforms = ["linux", "macos"]

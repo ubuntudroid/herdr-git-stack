@@ -335,6 +335,30 @@ gs_birth_lines() {
   done
 }
 
+# gs_behind_upstreams <repo_root>
+# "<branch>\t<upstream>" for every local branch strictly behind its upstream.
+#
+# A branch whose local ref is behind the ref it tracks is the wrong thing to
+# measure a stack from: a stacking tool that rebases and force-pushes cannot move
+# a local ref that is checked out in a linked worktree, so the branch keeps
+# pointing at its pre-rebase commit. That commit shares no commit id with the
+# rebased stack, and a rebase that also resolved a conflict changes the diff, so
+# it shares no patch id either — the branch drops out of its stack entirely.
+# Measuring the upstream instead puts it back.
+#
+# trackshort is "<" (behind) or "<>" (diverged); both mean the local ref is
+# missing commits the upstream has. ">" (ahead only) and "=" are left alone, as
+# are branches with no upstream. Reads %(upstream), never a hardcoded "origin/",
+# so a fork or a second remote resolves correctly. One git process per repo.
+gs_behind_upstreams() {
+  # %09, not \t: for-each-ref emits a backslash-t literally, which would put the
+  # whole line in $1 and silently match nothing.
+  git -C "$1" for-each-ref \
+      --format='%(refname:short)%09%(upstream:short)%09%(upstream:trackshort)' \
+      refs/heads 2>/dev/null \
+    | awk -F'\t' '$2 != "" && ($3 == "<" || $3 == "<>") { print $1 "\t" $2 }'
+}
+
 # gs_fork_edges <repo_root> <trunk> <orphan_file> <branch>...
 # "<child>\t<parent>" for orphans whose parent can still be identified through the
 # reflog. This is the only tier that survives a rebase which ALSO resolved

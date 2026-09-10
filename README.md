@@ -181,7 +181,7 @@ Consequences worth knowing:
 
 ```bash
 ./test.sh          # everything except herdr and poll
-./test.sh infer    # one group: token, infer, git, trunk, bracket, bars, moves, stacks, herdr, poll
+./test.sh infer    # one group: token, infer, git, trunk, upstream, bracket, bars, moves, stacks, herdr, poll
 ```
 
 `herdr` and `poll` both touch a **live herdr session**: each creates and

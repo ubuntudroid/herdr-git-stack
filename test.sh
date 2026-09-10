@@ -915,6 +915,106 @@ token wc ├3/3 └' \
   rm -rf "$base" "$sd"
 }
 
+# A stacking tool that rebases and force-pushes cannot move a local ref that is
+# checked out in a linked worktree, so that branch keeps pointing at its
+# pre-rebase commit: diverged from its upstream, sharing no commit id with the
+# rebased stack, and — once the rebase resolved a conflict — no patch id either.
+# All three inference tiers miss it and the branch silently leaves its own stack.
+# Measuring the upstream instead puts it back. Runs the real poller.
+test_upstream() {
+  if ! { nc -h 2>&1 || true; } | grep -q -- '-U'; then
+    printf 'SKIP upstream group: this nc has no -U support, so poll-once cannot preflight\n' >&2
+    return 0
+  fi
+  local base r sd bin json out
+  base="$(mktemp -d)"; base=$(readlink -f "$base"); GS_T_HOME="$base"
+  r="$(gs_t_fixture "$base")" || { gs_assert 'upstream fixture built' 'yes' 'no'; rm -rf "$base"; return 1; }
+  GS_T_REPO="$r"
+
+  # Trunk one commit AHEAD of local main, so the trunk space is itself behind
+  # its upstream. It must still be excluded as trunk — the substitution has to
+  # run after the trunk check, not before.
+  ( cd "$r" && gs_t_git checkout -q -b tmp-trunk main \
+    && echo m2 > m2.txt && gs_t_git add -A && gs_t_git commit -qm m2 ) >/dev/null 2>&1
+  gs_t_git -C "$r" update-ref refs/remotes/origin/main "$(gs_t_git -C "$r" rev-parse tmp-trunk)"
+  gs_t_git -C "$r" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  ( cd "$r" && gs_t_git checkout -q main && gs_t_git branch -q -D tmp-trunk ) >/dev/null 2>&1
+
+  # %(upstream) resolves branch.<n>.merge through the remote's FETCH REFSPEC, so
+  # a remote with no url/fetch config yields no upstream at all and the whole
+  # group would pass vacuously. The url is never dialled; only the refspec is read.
+  gs_t_git -C "$r" config remote.origin.url "$r"
+  gs_t_git -C "$r" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+
+  # Every branch tracks its own remote ref, all three initially up to date.
+  local b
+  for b in main feat-a feat-b feat-c; do
+    [ "$b" = main ] || gs_t_git -C "$r" update-ref "refs/remotes/origin/$b" "$(gs_t_git -C "$r" rev-parse "$b")"
+    gs_t_git -C "$r" config "branch.$b.remote" origin
+    gs_t_git -C "$r" config "branch.$b.merge" "refs/heads/$b"
+  done
+
+  gs_assert 'trunk is the remote ref' 'origin/main' "$(gs_trunk "$r")"
+
+  # feat-b's local ref falls back to a commit off the old trunk, keeping one
+  # local commit: diverged (ahead 1, behind 1), which is exactly the shape a
+  # force-pushed restack leaves behind. origin/feat-b stays in the chain.
+  ( cd "$base/wt-b" && gs_t_git reset --hard -q main \
+    && echo b-stale > b-stale.txt && gs_t_git add -A \
+    && gs_t_git commit -qm b-stale ) >/dev/null 2>&1
+
+  gs_assert 'only the stale branch reports as behind' 'feat-b	origin/feat-b' \
+    "$(gs_behind_upstreams "$r" | grep -v '^main	')"
+  gs_assert 'a branch level with its upstream is left alone' '' \
+    "$(gs_behind_upstreams "$r" | grep '^feat-a	' || true)"
+  gs_assert 'the trunk is reported too, and the trunk check must win' 'main	origin/main' \
+    "$(gs_behind_upstreams "$r" | grep '^main	')"
+
+  # Without the fallback the stale branch is gone and the stack shrinks to two:
+  # feat-c reaches past it to feat-a, which is the bug.
+  gs_assert 'stale local ref drops out of its own stack' \
+'feat-a - 1 2 0 feat-a
+feat-c feat-a 2 2 0 feat-a' \
+    "$(gs_commit_lines "$r" origin/main feat-a feat-b feat-c \
+       | awk -f "$DIR/infer.awk" | sort | tr '\t' ' ')"
+
+  sd="$(mktemp -d)"; bin="$base/herdr"; json="$base/ws.json"
+  gs_t_ws_json "$json" "wmain:$r" "wa:$base/wt-a" "wb:$base/wt-b" "wc:$base/wt-c"
+  gs_t_herdr_stub "$bin" "$json"
+  out="$(GIT_STACK_DRYRUN=1 GIT_STACK_STATE_DIR="$sd" GIT_STACK_CONFIG_DIR="$base" \
+         HERDR_BIN_PATH="$bin" "$DIR/poller-ctl.sh" poll-once 2>/dev/null | sort)"
+
+  # All three members back, in order, and the trunk space still cleared even
+  # though it is behind its own upstream.
+  gs_assert 'upstream fallback restores the full stack' \
+'clear wmain
+token wa ┌1/3 │
+token wb ├2/3 │
+token wc ├3/3 └' \
+    "$out"
+
+  # The substituted branch must still map to its own space, not be dropped for
+  # having a name no workspace reports.
+  gs_assert 'the substituted branch keeps its space' 'origin/feat-b	wb' \
+    "$(grep '	wb$' "$sd/map.tsv")"
+
+  # Stack shape now depends on refs/remotes, not just refs/heads: a fetch that
+  # force-pushed an upstream changes which ref gets substituted, and nothing
+  # local moves. A fingerprint blind to that would leave the old tokens standing
+  # until some local branch happened to change — the failure test_trunk names.
+  local fp1 fp2
+  fp1="$(GIT_STACK_STATE_DIR="$sd" HERDR_BIN_PATH="$bin" "$DIR/poller-ctl.sh" fingerprint)"
+  gs_assert 'fingerprint is stable while nothing moves' "$fp1" \
+    "$(GIT_STACK_STATE_DIR="$sd" HERDR_BIN_PATH="$bin" "$DIR/poller-ctl.sh" fingerprint)"
+
+  gs_t_git -C "$r" update-ref refs/remotes/origin/feat-b "$(gs_t_git -C "$r" rev-parse feat-c)"
+  fp2="$(GIT_STACK_STATE_DIR="$sd" HERDR_BIN_PATH="$bin" "$DIR/poller-ctl.sh" fingerprint)"
+  gs_assert 'fingerprint notices an upstream moving' 'differs' \
+    "$([ "$fp1" != "$fp2" ] && echo differs || echo same)"
+
+  rm -rf "$base" "$sd"
+}
+
 # A branching stack has two members at the same deepest position, so closing
 # the bracket on depth would draw `└` twice and leave the line running on
 # underneath. The closer is whichever member the sort puts LAST, and this runs
@@ -1037,6 +1137,9 @@ case "$GROUP" in
 esac
 case "$GROUP" in
   trunk|all) test_trunk ;;
+esac
+case "$GROUP" in
+  upstream|all) test_upstream ;;
 esac
 case "$GROUP" in
   bracket|all) test_bracket ;;
